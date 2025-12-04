@@ -35,6 +35,44 @@
 namespace juce
 {
 
+#if defined (BATCHY_DISABLE_MIDI) && BATCHY_DISABLE_MIDI
+
+struct EndpointGroup {};
+
+class MidiDeviceListConnectionBroadcaster
+{
+public:
+    MidiDeviceListConnection::Key add (std::function<void()>)
+    {
+        return {};
+    }
+
+    void remove (MidiDeviceListConnection::Key) {}
+
+    void getAllMidiDeviceInfo (ump::IOKind, Array<MidiDeviceInfo>& buffer)
+    {
+        buffer.clear();
+    }
+
+    std::optional<MidiDeviceInfo> getInfoForId (ump::IOKind, const String&)
+    {
+        return {};
+    }
+
+    std::optional<EndpointGroup> getEndpointGroupForId (ump::IOKind, const String&)
+    {
+        return {};
+    }
+
+    static auto& get()
+    {
+        static MidiDeviceListConnectionBroadcaster instance;
+        return instance;
+    }
+};
+
+#else
+
 /*  Identifies a single group of an endpoint. */
 struct EndpointGroup
 {
@@ -353,5 +391,7 @@ private:
     std::map<MidiDeviceListConnection::Key, std::function<void()>> callbacks;
     MidiDeviceListConnection::Key key = 0;
 };
+
+#endif // BATCHY_DISABLE_MIDI
 
 } // namespace juce

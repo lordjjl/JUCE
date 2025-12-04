@@ -1486,6 +1486,14 @@ public:
 
     void runTest() override
     {
+        if (std::getenv ("BATCHY_HEADLESS") != nullptr
+            || std::getenv ("BATCHY_FORCE_HEADLESS_TESTS") != nullptr)
+        {
+            beginTest ("AudioDeviceManager tests skipped in headless mode");
+            expect (true);
+            return;
+        }
+
         ScopedJuceInitialiser_GUI libraryInitialiser;
 
         beginTest ("When the AudioDeviceSetup has non-empty device names, initialise uses the requested devices");

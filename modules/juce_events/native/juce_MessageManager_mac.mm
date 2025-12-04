@@ -32,9 +32,13 @@
   ==============================================================================
 */
 
+#include <ApplicationServices/ApplicationServices.h>
+#include <cstdlib>
+#include <cstdio>
+#include <limits>
+
 namespace juce
 {
-
 using AppFocusChangeCallback = void (*)();
 AppFocusChangeCallback appFocusChangeCallback = nullptr;
 
@@ -379,9 +383,30 @@ void MessageManager::stopDispatchLoop()
 bool MessageManager::runDispatchLoopUntil (int millisecondsToRunFor)
 {
     jassert (millisecondsToRunFor >= 0);
-    jassert (isThisTheMessageThread()); // must only be called by the message thread
+    jassert (isThisTheMessageThread());
 
     auto endTime = Time::currentTimeMillis() + millisecondsToRunFor;
+
+    if (NSApp == nil)
+    {
+        const auto hasDeadline = millisecondsToRunFor >= 0;
+        const auto endTime = hasDeadline ? (juce::Time::currentTimeMillis() + millisecondsToRunFor) : std::numeric_limits<int64>::max();
+
+        while (quitMessagePosted.get() == 0)
+        {
+            const auto now = juce::Time::currentTimeMillis();
+
+            if (hasDeadline && now >= endTime)
+                break;
+
+            const auto remainingMs = hasDeadline ? juce::jmax<int64> (1, endTime - now) : 10;
+            const auto sliceSeconds = juce::jlimit (0.001, 0.5, remainingMs * 0.001);
+
+            CFRunLoopRunInMode (kCFRunLoopDefaultMode, sliceSeconds, true);
+        }
+
+        return quitMessagePosted.get() == 0;
+    }
 
     while (quitMessagePosted.get() == 0)
     {
@@ -413,7 +438,19 @@ void initialiseNSApplication()
 {
     JUCE_AUTORELEASEPOOL
     {
-        [NSApplication sharedApplication];
+        if (NSApp == nil)
+        {
+            NSString* headlessFlag = [[[NSProcessInfo processInfo] environment] objectForKey: nsStringLiteral ("BATCHY_HEADLESS")];
+
+            if (headlessFlag != nil)
+            {
+                NSString* lower = [headlessFlag lowercaseString];
+                if ([lower isEqualToString: nsStringLiteral ("1")] || [lower isEqualToString: nsStringLiteral ("true")])
+                    return;
+            }
+
+            [NSApplication sharedApplication];
+        }
     }
 }
 

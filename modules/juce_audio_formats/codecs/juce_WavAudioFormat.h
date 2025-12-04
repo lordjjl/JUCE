@@ -161,6 +161,7 @@ public:
     static const char* const riffInfoSharpness;             /**< Metadata property name used in INFO chunks. */
     static const char* const riffInfoSixthLanguage;         /**< Metadata property name used in INFO chunks. */
     static const char* const riffInfoSoftware;              /**< Metadata property name used in INFO chunks. */
+    static const char* const riffInfoBatchyMetadata;        /**< Metadata property name used for embedded Batchy metadata. */
     static const char* const riffInfoSoundSchemeTitle;      /**< Metadata property name used in INFO chunks. */
     static const char* const riffInfoSource;                /**< Metadata property name used in INFO chunks. */
     static const char* const riffInfoSourceFrom;            /**< Metadata property name used in INFO chunks. */

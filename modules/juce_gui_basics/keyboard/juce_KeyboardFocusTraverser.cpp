@@ -113,8 +113,14 @@ struct KeyboardFocusTraverserTests final : public UnitTest
 
     void runTest() override
     {
-        ScopedJuceInitialiser_GUI libraryInitialiser;
-        const auto mml = std::make_unique<MessageManagerLock>();
+        const auto messageLock = createOptionalMessageManagerLock();
+        ignoreUnused (messageLock);
+
+        if (MessageManager::getInstanceWithoutCreating() == nullptr)
+        {
+            logMessage ("Skipping KeyboardFocusTraverser tests: MessageManager unavailable in headless environment.");
+            return;
+        }
 
         beginTest ("No child wants keyboard focus");
         {
@@ -188,6 +194,29 @@ struct KeyboardFocusTraverserTests final : public UnitTest
 
                 componentToTest = traverser.getNextComponent (componentToTest);
             }
+        }
+
+        beginTest ("Disabled or invisible children are skipped");
+        {
+            const auto parent = std::make_unique<TestComponent>();
+
+            parent->children[0].setWantsKeyboardFocus (true);
+            parent->children[1].setWantsKeyboardFocus (true);
+            parent->children[1].setEnabled (false);
+            parent->children[2].setWantsKeyboardFocus (true);
+            parent->children[2].setVisible (false);
+
+            const auto allComponents = traverser.getAllComponents (parent.get());
+
+            expect (std::find (allComponents.cbegin(), allComponents.cend(), &parent->children[0]) != allComponents.cend());
+            expect (std::find (allComponents.cbegin(), allComponents.cend(), &parent->children[1]) == allComponents.cend());
+            expect (std::find (allComponents.cbegin(), allComponents.cend(), &parent->children[2]) == allComponents.cend());
+
+            auto* defaultComponent = traverser.getDefaultComponent (parent.get());
+
+            expect (defaultComponent == &parent->children[0]);
+            expect (traverser.getNextComponent (defaultComponent) == nullptr);
+            expect (traverser.getPreviousComponent (defaultComponent) == nullptr);
         }
 
         beginTest ("Single nested child wants keyboard focus");
@@ -275,6 +304,14 @@ private:
 
         std::array<Component, 10> children;
     };
+
+    static std::unique_ptr<MessageManagerLock> createOptionalMessageManagerLock()
+    {
+        if (MessageManager::getInstanceWithoutCreating() != nullptr)
+            return std::make_unique<MessageManagerLock>();
+
+        return {};
+    }
 
     KeyboardFocusTraverser traverser;
 };

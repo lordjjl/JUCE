@@ -35,13 +35,100 @@
 namespace juce
 {
 
+#if defined (BATCHY_DISABLE_MIDI) && BATCHY_DISABLE_MIDI
+
+MidiDeviceListConnection MidiDeviceListConnection::make (std::function<void()>)
+{
+    return {};
+}
+
+Array<MidiDeviceInfo> MidiInput::getAvailableDevices()
+{
+    return {};
+}
+
+MidiDeviceInfo MidiInput::getDefaultDevice()
+{
+    return {};
+}
+
+std::unique_ptr<MidiInput> MidiInput::openDevice (const String&, MidiInputCallback*)
+{
+    return {};
+}
+
+std::unique_ptr<MidiInput> MidiInput::createNewDevice (const String&, MidiInputCallback*)
+{
+    return {};
+}
+
+void MidiInput::start() {}
+void MidiInput::stop() {}
+MidiDeviceInfo MidiInput::getDeviceInfo() const noexcept { return {}; }
+void MidiInput::setName (const String&) noexcept {}
+uint8_t MidiInput::getGroup() const { return 0; }
+ump::EndpointId MidiInput::getEndpointId() const { return {}; }
+void MidiInput::addCallback (MidiInputCallback&) {}
+void MidiInput::removeCallback (MidiInputCallback&) {}
+
+MidiOutput::MidiOutput (std::shared_ptr<ump::Session>,
+                        ump::Output,
+                        uint8_t,
+                        const MidiDeviceInfo&,
+                        ump::LegacyVirtualOutput) {}
+
+Array<MidiDeviceInfo> MidiOutput::getAvailableDevices()
+{
+    return {};
+}
+
+std::unique_ptr<MidiOutput> MidiOutput::openDevice (const String&)
+{
+    return {};
+}
+
+std::unique_ptr<MidiOutput> MidiOutput::createNewDevice (const String&)
+{
+    return {};
+}
+
+MidiDeviceInfo MidiOutput::getDeviceInfo() const noexcept
+{
+    return {};
+}
+
+#else
+
+namespace
+{
+bool isBatchyMidiDisabled()
+{
+   #if defined (BATCHY_DISABLE_MIDI) && BATCHY_DISABLE_MIDI
+    return true;
+   #else
+    static const bool disabledByEnv = []() -> bool
+    {
+        const auto value = SystemStats::getEnvironmentVariable("BATCHY_DISABLE_MIDI", {}).trim();
+        return value.equalsIgnoreCase("1")
+            || value.equalsIgnoreCase("true")
+            || value.equalsIgnoreCase("yes");
+    }();
+    return disabledByEnv;
+   #endif
+}
+}
+
 MidiDeviceListConnection MidiDeviceListConnection::make (std::function<void()> callback)
 {
+    MidiDeviceListConnection result;
+
+    if (isBatchyMidiDisabled())
+        return result;
+
     auto& broadcaster = MidiDeviceListConnectionBroadcaster::get();
 
     const auto key = broadcaster.add (std::move (callback));
 
-    MidiDeviceListConnection result;
     result.token = ErasedScopeGuard { [&broadcaster, key] { broadcaster.remove (key); } };
     return result;
 }
@@ -197,6 +284,9 @@ MidiInput::~MidiInput() = default;
 
 Array<MidiDeviceInfo> MidiInput::getAvailableDevices()
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     Array<MidiDeviceInfo> result;
     MidiDeviceListConnectionBroadcaster::get().getAllMidiDeviceInfo (ump::IOKind::src, result);
     return result;
@@ -209,6 +299,9 @@ MidiDeviceInfo MidiInput::getDefaultDevice()
 
 std::unique_ptr<MidiInput> MidiInput::openDevice (const String& deviceIdentifier, MidiInputCallback* callback)
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     const auto address = MidiDeviceListConnectionBroadcaster::get().getEndpointGroupForId (ump::IOKind::src, deviceIdentifier);
 
     if (! address.has_value())
@@ -264,6 +357,9 @@ static inline bool isValidMidi1VirtualEndpoint (const std::optional<ump::Endpoin
 
 std::unique_ptr<MidiInput> MidiInput::createNewDevice (const String& name, MidiInputCallback* callback)
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     auto session = getLegacySession();
 
     if (! session)
@@ -341,6 +437,9 @@ MidiOutput::MidiOutput (std::shared_ptr<ump::Session> s,
 
 Array<MidiDeviceInfo> MidiOutput::getAvailableDevices()
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     Array<MidiDeviceInfo> result;
     MidiDeviceListConnectionBroadcaster::get().getAllMidiDeviceInfo (ump::IOKind::dst, result);
     return result;
@@ -348,6 +447,9 @@ Array<MidiDeviceInfo> MidiOutput::getAvailableDevices()
 
 std::unique_ptr<MidiOutput> MidiOutput::openDevice (const String& deviceIdentifier)
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     const auto address = MidiDeviceListConnectionBroadcaster::get().getEndpointGroupForId (ump::IOKind::dst, deviceIdentifier);
 
     if (! address.has_value())
@@ -373,6 +475,9 @@ std::unique_ptr<MidiOutput> MidiOutput::openDevice (const String& deviceIdentifi
 
 std::unique_ptr<MidiOutput> MidiOutput::createNewDevice (const String& name)
 {
+    if (isBatchyMidiDisabled())
+        return {};
+
     auto session = getLegacySession();
 
     if (! session)
@@ -398,5 +503,7 @@ MidiDeviceInfo MidiOutput::getDeviceInfo() const noexcept
 {
     return customName.has_value() ? storedInfo.withName (*customName) : storedInfo;
 }
+
+#endif // BATCHY_DISABLE_MIDI
 
 } // namespace juce

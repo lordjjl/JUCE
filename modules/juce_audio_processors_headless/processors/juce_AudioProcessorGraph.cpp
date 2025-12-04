@@ -313,6 +313,18 @@ public:
             return false;
         }
 
+        bool hasOtherDestinations (const NodeAndChannel& source, NodeID currentDest, int channel) const
+        {
+            if (const auto destIter = map.find (source); destIter != map.cend())
+            {
+                for (const auto& nodeAndChannel : destIter->second)
+                    if (nodeAndChannel != NodeAndChannel { currentDest, channel })
+                        return true;
+            }
+
+            return false;
+        }
+
     private:
         Map map;
     };
@@ -407,11 +419,22 @@ public:
     void setState (std::optional<PrepareSettings> newSettings)
     {
         const std::lock_guard<std::mutex> lock (mutex);
-        next = newSettings;
+        requested = newSettings;
     }
 
     /*  Call from the audio thread only. */
-    std::optional<PrepareSettings> getLastRequestedSettings() const { return next; }
+    std::optional<PrepareSettings> getLastRequestedSettings() const
+    {
+        const std::lock_guard<std::mutex> lock (mutex);
+        return requested;
+    }
+
+    /*  Call from the audio thread only. */
+    std::optional<PrepareSettings> getLastAppliedSettings() const
+    {
+        const std::lock_guard<std::mutex> lock (mutex);
+        return applied;
+    }
 
     /*  Call from the main thread only!
 
@@ -430,13 +453,14 @@ public:
     */
     std::optional<PrepareSettings> applySettings (const Nodes& n)
     {
-        const auto settingsChanged = [this]
+        std::optional<PrepareSettings> requestedCopy;
+        std::optional<PrepareSettings> previouslyApplied;
+
         {
             const std::lock_guard<std::mutex> lock (mutex);
-            const auto result = current != next;
-            current = next;
-            return result;
-        }();
+            requestedCopy     = requested;
+            previouslyApplied = applied;
+        }
 
         // It may look like releaseResources and prepareToPlay could race with calls to processBlock
         // here, because applySettings is called from the main thread, processBlock is called from
@@ -456,6 +480,21 @@ public:
         // impossible to receive new PrepareSettings and to start a new RenderSequence rebuild while
         // a processBlock call is in progress.
 
+        auto appliedSettings = requestedCopy;
+
+        if (appliedSettings.has_value() && appliedSettings->precision == AudioProcessor::doublePrecision)
+        {
+            const auto allSupportDouble = std::all_of (n.getNodes().begin(), n.getNodes().end(), [] (const auto* node)
+            {
+                return node->getProcessor()->supportsDoublePrecisionProcessing();
+            });
+
+            if (! allSupportDouble)
+                appliedSettings->precision = AudioProcessor::singlePrecision;
+        }
+
+        const auto settingsChanged = appliedSettings != previouslyApplied;
+
         if (settingsChanged)
         {
             for (const auto& node : n.getNodes())
@@ -464,7 +503,7 @@ public:
             preparedNodes.clear();
         }
 
-        if (current.has_value())
+        if (appliedSettings.has_value())
         {
             for (const auto& node : n.getNodes())
             {
@@ -475,16 +514,21 @@ public:
 
                 auto* nodeProcessor = node->getProcessor();
                 const auto precision = nodeProcessor->supportsDoublePrecisionProcessing()
-                                     ? current->precision
+                                     ? appliedSettings->precision
                                      : AudioProcessor::singlePrecision;
 
                 nodeProcessor->setProcessingPrecision (precision);
-                nodeProcessor->setRateAndBufferSizeDetails (current->sampleRate, current->blockSize);
-                nodeProcessor->prepareToPlay               (current->sampleRate, current->blockSize);
+                nodeProcessor->setRateAndBufferSizeDetails (appliedSettings->sampleRate, appliedSettings->blockSize);
+                nodeProcessor->prepareToPlay               (appliedSettings->sampleRate, appliedSettings->blockSize);
             }
         }
 
-        return current;
+        {
+            const std::lock_guard<std::mutex> lock (mutex);
+            applied = appliedSettings;
+        }
+
+        return appliedSettings;
     }
 
     /*  Call from the main thread to indicate that a node has been removed from the graph.
@@ -502,9 +546,10 @@ public:
     }
 
 private:
-    std::mutex mutex;
+    mutable std::mutex mutex;
     std::set<NodeID> preparedNodes;
-    std::optional<PrepareSettings> current, next;
+    std::optional<PrepareSettings> requested;
+    std::optional<PrepareSettings> applied;
 };
 
 //==============================================================================
@@ -1195,8 +1240,9 @@ private:
 
             const auto nodeDelay = getNodeDelay (src.nodeID);
             const auto needsDelay = nodeDelay < maxLatency;
+            const auto sourceShared = reversed.hasOtherDestinations (src, node.nodeID, inputChan);
 
-            if ((inputChan < numOuts || needsDelay)
+            if ((inputChan < numOuts || needsDelay || sourceShared)
                 && isBufferNeededLater (reversed, ourRenderingIndex, inputChan, src))
             {
                 // We can't modify this channel because it's needed later by another node,
@@ -1865,10 +1911,16 @@ public:
         if (updateKind == UpdateKind::none)
             return;
 
-        if (updateKind == UpdateKind::sync && MessageManager::getInstance()->isThisTheMessageThread())
+        if (updateKind == UpdateKind::sync)
+        {
+            // Unit tests and offline graph manipulation often happen away from the message
+            // thread, but a synchronous rebuild should still be honoured immediately so the
+            // caller observes updated latency/precision state before continuing.
             handleAsyncUpdate();
-        else
-            updater.triggerAsyncUpdate();
+            return;
+        }
+
+        updater.triggerAsyncUpdate();
     }
 
     void reset()
@@ -1903,7 +1955,7 @@ public:
         auto* state = renderSequenceExchange.getAudioThreadState();
 
         // Only process if the graph has the correct blockSize, sampleRate etc.
-        if (state != nullptr && state->getSettings() == nodeStates.getLastRequestedSettings())
+        if (state != nullptr && state->getSettings() == nodeStates.getLastAppliedSettings())
         {
             state->process (audio, midi, playHead);
         }
@@ -1950,6 +2002,7 @@ private:
         {
             lastBuiltSequence.reset();
             renderSequenceExchange.set (nullptr);
+            owner->setLatencySamples (0);
         }
     }
 

@@ -32,6 +32,8 @@
   ==============================================================================
 */
 
+#include "../../../../../../../../NewProject/Source/Utils/HeadlessMessageThread.h"
+
 namespace juce
 {
 
@@ -43,6 +45,8 @@ class ActionBroadcaster;
 //==============================================================================
 /** See MessageManager::callFunctionOnMessageThread() for use of this function type. */
 using MessageCallbackFunction = void* (void* userData);
+
+#include <thread>
 
 
 //==============================================================================
@@ -553,6 +557,16 @@ private:
     JUCE_DECLARE_NON_COPYABLE (MessageManagerLock)
 };
 
+// Allow Batchy's headless message loop to satisfy JUCE thread assertions when the
+// platform MessageManager cannot be created (e.g., CI without a window server).
+namespace detail
+{
+    inline bool isHeadlessMessageThreadCurrent() noexcept
+    {
+        return batchy::threading::HeadlessMessageThread::getActive() != nullptr;
+    }
+}
+
 //==============================================================================
 /** This macro is used to catch unsafe use of functions which expect to only be called
     on the message thread, or when a MessageManagerLock is in place.
@@ -560,7 +574,7 @@ private:
     created, which could happen if you accidentally invoke it during a static constructor.
 */
 #define JUCE_ASSERT_MESSAGE_MANAGER_IS_LOCKED \
-    jassert (juce::MessageManager::existsAndIsLockedByCurrentThread());
+    jassert (juce::MessageManager::existsAndIsLockedByCurrentThread() || juce::detail::isHeadlessMessageThreadCurrent());
 
 /** This macro is used to catch unsafe use of functions which expect to only be called
     on the message thread.
@@ -568,13 +582,13 @@ private:
     created, which could happen if you accidentally invoke it during a static constructor.
 */
 #define JUCE_ASSERT_MESSAGE_THREAD \
-    jassert (juce::MessageManager::existsAndIsCurrentThread());
+    jassert (juce::MessageManager::existsAndIsCurrentThread() || juce::detail::isHeadlessMessageThreadCurrent());
 
 /** This macro is used to catch unsafe use of functions which expect to not be called
     outside the lifetime of the MessageManager.
 */
 #define JUCE_ASSERT_MESSAGE_MANAGER_EXISTS \
-    jassert (juce::MessageManager::getInstanceWithoutCreating() != nullptr);
+    jassert (juce::MessageManager::getInstanceWithoutCreating() != nullptr || juce::detail::isHeadlessMessageThreadCurrent());
 
 
 } // namespace juce

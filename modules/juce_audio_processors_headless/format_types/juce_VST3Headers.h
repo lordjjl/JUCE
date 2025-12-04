@@ -99,7 +99,16 @@ JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-W#warnings",
 // having the wrong value when the /Zc:__cplusplus is not enabled. This work
 // around prevents needing to provide that flag
 
-#include <pluginterfaces/base/fplatform.h>
+#define JUCE_VST3_STRINGISE2(x) #x
+#define JUCE_VST3_STRINGISE(x)  JUCE_VST3_STRINGISE2(x)
+
+#if __has_include(<pluginterfaces/base/fplatform.h>)
+ #define JUCE_VST3_LOCAL_INCLUDE(path) <path>
+#else
+ #define JUCE_VST3_LOCAL_INCLUDE(path) JUCE_VST3_STRINGISE(VST3_SDK/path)
+#endif
+
+#include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/fplatform.h)
 
 #ifdef SMTG_CPP20
  #undef SMTG_CPP20
@@ -107,53 +116,53 @@ JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-W#warnings",
 #endif
 
 #if JUCE_VST3HEADERS_INCLUDE_HEADERS_ONLY
- #include <base/source/fstring.h>
- #include <pluginterfaces/base/conststringtable.h>
- #include <pluginterfaces/base/funknown.h>
- #include <pluginterfaces/base/ipluginbase.h>
- #include <pluginterfaces/base/iplugincompatibility.h>
- #include <pluginterfaces/base/ustring.h>
- #include <pluginterfaces/gui/iplugview.h>
- #include <pluginterfaces/gui/iplugviewcontentscalesupport.h>
- #include <pluginterfaces/vst/ivstattributes.h>
- #include <pluginterfaces/vst/ivstaudioprocessor.h>
- #include <pluginterfaces/vst/ivstcomponent.h>
- #include <pluginterfaces/vst/ivstcontextmenu.h>
- #include <pluginterfaces/vst/ivsteditcontroller.h>
- #include <pluginterfaces/vst/ivstevents.h>
- #include <pluginterfaces/vst/ivsthostapplication.h>
- #include <pluginterfaces/vst/ivstmessage.h>
- #include <pluginterfaces/vst/ivstmidicontrollers.h>
- #include <pluginterfaces/vst/ivstparameterchanges.h>
- #include <pluginterfaces/vst/ivstplugview.h>
- #include <pluginterfaces/vst/ivstprocesscontext.h>
- #include <pluginterfaces/vst/ivstremapparamid.h>
- #include <pluginterfaces/vst/vsttypes.h>
- #include <pluginterfaces/vst/ivstunits.h>
- #include <pluginterfaces/vst/ivstmidicontrollers.h>
- #include <pluginterfaces/vst/ivstchannelcontextinfo.h>
- #include <public.sdk/source/common/memorystream.h>
- #include <public.sdk/source/vst/utility/uid.h>
- #include <public.sdk/source/vst/utility/vst2persistence.h>
- #include <public.sdk/source/vst/vsteditcontroller.h>
- #include <public.sdk/source/vst/vstpresetfile.h>
- #include <public.sdk/source/vst/moduleinfo/moduleinfoparser.h>
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fstring.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/conststringtable.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/funknown.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/ipluginbase.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/iplugincompatibility.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/ustring.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/gui/iplugview.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/gui/iplugviewcontentscalesupport.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstattributes.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstaudioprocessor.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstcomponent.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstcontextmenu.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivsteditcontroller.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstevents.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivsthostapplication.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstmessage.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstmidicontrollers.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstparameterchanges.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstplugview.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstprocesscontext.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstremapparamid.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/vsttypes.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstunits.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstmidicontrollers.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstchannelcontextinfo.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/common/memorystream.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/vst/utility/uid.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/vst/utility/vst2persistence.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/vst/vsteditcontroller.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/vst/vstpresetfile.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/vst/moduleinfo/moduleinfoparser.h)
 
  #include <juce_audio_processors_headless/format_types/pslextensions/ipslviewembedding.h>
 #else
- // needed for VST_VERSION
- #include <pluginterfaces/vst/vsttypes.h>
+// needed for VST_VERSION
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/vsttypes.h)
 
  #ifndef NOMINMAX
   #define NOMINMAX // Some of the steinberg sources don't set this before including windows.h
  #endif
 
- #include <base/source/baseiids.cpp>
- #include <base/source/fbuffer.cpp>
- #include <base/source/fdebug.cpp>
- #include <base/source/fobject.cpp>
- #include <base/source/fstreamer.cpp>
- #include <base/source/fstring.cpp>
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/baseiids.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fbuffer.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fdebug.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fobject.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fstreamer.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/fstring.cpp)
 
  // The following shouldn't leak from fstring.cpp
  #undef stricmp
@@ -164,11 +173,11 @@ JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-W#warnings",
  #undef vsnwprintf
 
  #if VST_VERSION >= 0x030608
-  #include <base/thread/source/flock.cpp>
-  #include <pluginterfaces/base/coreiids.cpp>
- #else
-  #include <base/source/flock.cpp>
- #endif
+  #include JUCE_VST3_LOCAL_INCLUDE(base/thread/source/flock.cpp)
+  #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/coreiids.cpp)
+#else
+  #include JUCE_VST3_LOCAL_INCLUDE(base/source/flock.cpp)
+#endif
 
  #pragma push_macro ("True")
  #undef True
@@ -177,18 +186,18 @@ JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-W#warnings",
 
  JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE ("-Wmultichar", "-Wfour-char-constants")
 
- #include <base/source/updatehandler.cpp>
- #include <pluginterfaces/base/conststringtable.cpp>
- #include <pluginterfaces/base/funknown.cpp>
- #include <pluginterfaces/base/ipluginbase.h>
- #include <pluginterfaces/base/ustring.cpp>
- #include <pluginterfaces/gui/iplugview.h>
- #include <pluginterfaces/gui/iplugviewcontentscalesupport.h>
- #include <pluginterfaces/vst/ivstchannelcontextinfo.h>
- #include <pluginterfaces/vst/ivstmidicontrollers.h>
- #include <public.sdk/source/common/commonstringconvert.cpp>
- #include <public.sdk/source/common/memorystream.cpp>
- #include <public.sdk/source/common/pluginview.cpp>
+ #include JUCE_VST3_LOCAL_INCLUDE(base/source/updatehandler.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/conststringtable.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/funknown.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/ipluginbase.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/base/ustring.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/gui/iplugview.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/gui/iplugviewcontentscalesupport.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstchannelcontextinfo.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(pluginterfaces/vst/ivstmidicontrollers.h)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/common/commonstringconvert.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/common/memorystream.cpp)
+ #include JUCE_VST3_LOCAL_INCLUDE(public.sdk/source/common/pluginview.cpp)
  #include <public.sdk/source/vst/hosting/hostclasses.cpp>
  #include <public.sdk/source/vst/moduleinfo/moduleinfoparser.cpp>
  #include <public.sdk/source/vst/utility/stringconvert.cpp>

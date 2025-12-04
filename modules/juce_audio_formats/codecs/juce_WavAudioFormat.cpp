@@ -142,6 +142,7 @@ const char* const WavAudioFormat::riffInfoSeventhLanguage       = "IAS7";
 const char* const WavAudioFormat::riffInfoSharpness             = "ISHP";
 const char* const WavAudioFormat::riffInfoSixthLanguage         = "IAS6";
 const char* const WavAudioFormat::riffInfoSoftware              = "ISFT";
+const char* const WavAudioFormat::riffInfoBatchyMetadata        = "BMTD";
 const char* const WavAudioFormat::riffInfoSoundSchemeTitle      = "DISP";
 const char* const WavAudioFormat::riffInfoSource                = "ISRC";
 const char* const WavAudioFormat::riffInfoSourceFrom            = "ISRF";
@@ -735,6 +736,7 @@ namespace WavFileHelpers
             WavAudioFormat::riffInfoSharpness,
             WavAudioFormat::riffInfoSixthLanguage,
             WavAudioFormat::riffInfoSoftware,
+            WavAudioFormat::riffInfoBatchyMetadata,
             WavAudioFormat::riffInfoSoundSchemeTitle,
             WavAudioFormat::riffInfoSource,
             WavAudioFormat::riffInfoSourceFrom,
