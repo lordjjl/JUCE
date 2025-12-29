@@ -32,7 +32,9 @@
   ==============================================================================
 */
 
-#include "../../../../../../../../NewProject/Source/Utils/HeadlessMessageThread.h"
+#ifdef BATCHY_HEADLESS_SUPPORT
+#include "HeadlessMessageThread.h"
+#endif
 
 namespace juce
 {
@@ -563,7 +565,11 @@ namespace detail
 {
     inline bool isHeadlessMessageThreadCurrent() noexcept
     {
+    #ifdef BATCHY_HEADLESS_SUPPORT
         return batchy::threading::HeadlessMessageThread::getActive() != nullptr;
+    #else
+        return false;
+    #endif
     }
 }
 
