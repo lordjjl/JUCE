@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FTYPES_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FTYPES_H__
 
 #include "fplatform.h"
 
@@ -174,3 +176,5 @@ namespace Steinberg
 // Enable this for old compilers
 // #define nullptr NULL
 #endif
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FTYPES_H__
