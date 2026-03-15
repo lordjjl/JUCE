@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFO_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFO_H__
 
 #include <cstdint>
 #include <string>
@@ -98,3 +100,5 @@ struct ModuleInfo
 
 //------------------------------------------------------------------------
 } // Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFO_H__

@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTDATAEXCHANGE_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTDATAEXCHANGE_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -219,3 +221,5 @@ DECLARE_CLASS_IID (IDataExchangeReceiver, 0x45A759DC, 0x84FA4907, 0xABCB6175, 0x
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTDATAEXCHANGE_H__

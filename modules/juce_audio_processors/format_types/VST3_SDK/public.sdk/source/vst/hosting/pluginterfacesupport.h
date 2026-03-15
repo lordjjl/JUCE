@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_PLUGINTERFACESUPPORT_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_PLUGINTERFACESUPPORT_H__
 
 #include "pluginterfaces/vst/ivstpluginterfacesupport.h"
 
@@ -68,3 +70,5 @@ private:
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_PLUGINTERFACESUPPORT_H__

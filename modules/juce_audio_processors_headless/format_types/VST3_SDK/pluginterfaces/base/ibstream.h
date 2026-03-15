@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_IBSTREAM_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_IBSTREAM_H__
 
 #include "funknown.h"
 
@@ -85,3 +87,5 @@ DECLARE_CLASS_IID (ISizeableStream, 0x04F9549E, 0xE02F4E6E, 0x87E86A87, 0x47F4E1
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_IBSTREAM_H__

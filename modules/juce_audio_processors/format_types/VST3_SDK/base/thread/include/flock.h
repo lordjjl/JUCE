@@ -41,6 +41,8 @@
 /** @defgroup baseLocks Locks */
 //----------------------------------------------------------------------------------
 #pragma once
+#ifndef __STEINBERG_BASE_THREAD_INCLUDE_FLOCK_H__
+#define __STEINBERG_BASE_THREAD_INCLUDE_FLOCK_H__
 
 #include "base/source/fobject.h"
 #include "pluginterfaces/base/ftypes.h"
@@ -182,3 +184,5 @@ private:
 } // namespace Thread
 } // namespace Base
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_THREAD_INCLUDE_FLOCK_H__

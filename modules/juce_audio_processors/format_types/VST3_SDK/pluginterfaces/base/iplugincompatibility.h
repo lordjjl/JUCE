@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_IPLUGINCOMPATIBILITY_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_IPLUGINCOMPATIBILITY_H__
 
 #include "ibstream.h"
 
@@ -120,3 +122,5 @@ DECLARE_CLASS_IID (IPluginCompatibility, 0x4AFD4B6A, 0x35D7C240, 0xA5C31414, 0xF
 
 //------------------------------------------------------------------------
 } // Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_IPLUGINCOMPATIBILITY_H__

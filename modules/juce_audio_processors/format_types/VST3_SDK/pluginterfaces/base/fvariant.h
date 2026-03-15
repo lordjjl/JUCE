@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FVARIANT_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FVARIANT_H__
 
 #include "pluginterfaces/base/fstrdefs.h"
 #include "pluginterfaces/base/funknown.h"
@@ -296,3 +298,5 @@ inline FVariant& FVariant::operator= (const FVariant& variant)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FVARIANT_H__

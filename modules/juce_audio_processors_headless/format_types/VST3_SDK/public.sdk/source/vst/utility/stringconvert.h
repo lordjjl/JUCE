@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_STRINGCONVERT_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_STRINGCONVERT_H__
 
 #include "pluginterfaces/vst/vsttypes.h"
 #include <string>
@@ -209,3 +211,5 @@ std::u16string toString (NumberT value)
 
 //------------------------------------------------------------------------
 } // VST3
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_STRINGCONVERT_H__

@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTNOTEEXPRESSION_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTNOTEEXPRESSION_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -253,3 +255,5 @@ DECLARE_CLASS_IID (IKeyswitchController, 0x1F2F76D3, 0xBFFB4B96, 0xB99527A5, 0x5
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTNOTEEXPRESSION_H__

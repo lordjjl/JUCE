@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTMIDILEARN_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTMIDILEARN_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -104,3 +106,5 @@ DECLARE_CLASS_IID (IMidiLearn, 0x6B2449CC, 0x419740B5, 0xAB3C79DA, 0xC5FE5C86)
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTMIDILEARN_H__

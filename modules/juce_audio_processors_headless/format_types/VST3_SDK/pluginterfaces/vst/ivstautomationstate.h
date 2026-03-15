@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTAUTOMATIONSTATE_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTAUTOMATIONSTATE_H__
 
 #include "pluginterfaces/vst/vsttypes.h"
 
@@ -65,3 +67,5 @@ DECLARE_CLASS_IID (IAutomationState, 0xB4E8287F, 0x1BB346AA, 0x83A46667, 0x68937
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTAUTOMATIONSTATE_H__

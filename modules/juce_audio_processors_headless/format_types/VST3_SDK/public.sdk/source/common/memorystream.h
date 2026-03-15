@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_MEMORYSTREAM_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_MEMORYSTREAM_H__
 
 #include "pluginterfaces/base/ibstream.h"
 
@@ -77,3 +79,5 @@ protected:
 };
 
 } // namespace
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_MEMORYSTREAM_H__

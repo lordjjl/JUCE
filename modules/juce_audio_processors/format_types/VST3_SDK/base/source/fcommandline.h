@@ -41,6 +41,8 @@
     @see Steinberg::CommandLine */
 //------------------------------------------------------------------------
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_FCOMMANDLINE_H__
+#define __STEINBERG_BASE_SOURCE_FCOMMANDLINE_H__
 
 #include <algorithm>
 #include <deque>
@@ -390,3 +392,5 @@ bool parse (int ac, char* av[], const Descriptions& desc, VariablesMap& result, 
 //------------------------------------------------------------------------
 } // namespace CommandLine
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_SOURCE_FCOMMANDLINE_H__

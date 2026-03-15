@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_USTRING_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_USTRING_H__
 
 #include "ftypes.h"
 
@@ -114,3 +116,5 @@ typedef UStringBuffer<256> UString256; ///< 256 character UTF-16 string
 #define USTRINGSIZE(var) (sizeof (var) / sizeof (Steinberg::char16))
 
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_USTRING_H__

@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENT_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENT_H__
 
 #include "public.sdk/source/vst/vstcomponentbase.h"
 #include "public.sdk/source/vst/vstbus.h"
@@ -116,3 +118,5 @@ tresult getSpeakerChannelIndex (SpeakerArrangement arrangement, uint64 speaker, 
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENT_H__

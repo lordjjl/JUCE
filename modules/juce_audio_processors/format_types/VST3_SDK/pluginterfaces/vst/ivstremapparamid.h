@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTREMAPPARAMID_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTREMAPPARAMID_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -76,3 +78,5 @@ DECLARE_CLASS_IID (IRemapParamID, 0x2B88021E, 0x6286B646, 0xB49DF76A, 0x5663061C
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTREMAPPARAMID_H__

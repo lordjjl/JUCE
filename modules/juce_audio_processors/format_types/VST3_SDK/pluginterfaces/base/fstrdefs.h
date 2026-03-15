@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FSTRDEFS_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FSTRDEFS_H__
 
 #include "ftypes.h"
 
@@ -291,3 +293,5 @@ inline const char16* wscast (const wchar_t* s) { static_assert (sizeof (wchar_t)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FSTRDEFS_H__

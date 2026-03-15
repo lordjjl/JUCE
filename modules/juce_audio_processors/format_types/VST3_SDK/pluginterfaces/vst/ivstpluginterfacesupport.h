@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTPLUGINTERFACESUPPORT_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTPLUGINTERFACESUPPORT_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -65,3 +67,5 @@ DECLARE_CLASS_IID (IPlugInterfaceSupport, 0x4FB58B9E, 0x9EAA4E0F, 0xAB361C1C, 0x
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTPLUGINTERFACESUPPORT_H__

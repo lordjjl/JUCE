@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_OPTIONAL_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_OPTIONAL_H__
 
 #include <cassert>
 #include <memory>
@@ -133,3 +135,5 @@ private:
 
 //------------------------------------------------------------------------
 }
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_OPTIONAL_H__

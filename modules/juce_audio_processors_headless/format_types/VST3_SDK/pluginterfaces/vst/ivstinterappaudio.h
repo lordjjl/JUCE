@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTINTERAPPAUDIO_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTINTERAPPAUDIO_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -140,3 +142,5 @@ DECLARE_CLASS_IID (IInterAppAudioPresetManager, 0xADE6FCC4, 0x46C94E1D, 0xB3B49A
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTINTERAPPAUDIO_H__

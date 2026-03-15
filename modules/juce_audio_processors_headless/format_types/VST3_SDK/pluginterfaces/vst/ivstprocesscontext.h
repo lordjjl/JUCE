@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTPROCESSCONTEXT_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTPROCESSCONTEXT_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -151,3 +153,5 @@ struct ProcessContext
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTPROCESSCONTEXT_H__

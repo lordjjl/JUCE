@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_VSTTYPES_H__
+#define __STEINBERG_PLUGINTERFACES_VST_VSTTYPES_H__
 
 #include "pluginterfaces/base/fstrdefs.h"
 
@@ -157,3 +159,4 @@ static SMTG_CONSTEXPR const uint32 SDKVersion_3_0_0 	= VST_3_0_0_VERSION;
 } // namespace Vst
 } // namespace Steinberg
 
+#endif // __STEINBERG_PLUGINTERFACES_VST_VSTTYPES_H__

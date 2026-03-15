@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENTBASE_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENTBASE_H__
 
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/vst/ivstmessage.h"
@@ -108,3 +110,5 @@ protected:
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTCOMPONENTBASE_H__

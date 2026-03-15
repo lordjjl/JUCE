@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTBUS_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTBUS_H__
 
 #include "base/source/fobject.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -170,3 +172,5 @@ protected:
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTBUS_H__

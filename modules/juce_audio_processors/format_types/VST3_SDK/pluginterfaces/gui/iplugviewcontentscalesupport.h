@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEWCONTENTSCALESUPPORT_H__
+#define __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEWCONTENTSCALESUPPORT_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -73,3 +75,5 @@ DECLARE_CLASS_IID (IPlugViewContentScaleSupport, 0x65ED9690, 0x8AC44525, 0x8AADE
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEWCONTENTSCALESUPPORT_H__

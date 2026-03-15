@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_UPDATEHANDLER_H__
+#define __STEINBERG_BASE_SOURCE_UPDATEHANDLER_H__
 
 #include "base/source/fobject.h"
 #include "base/thread/include/flock.h"
@@ -148,3 +150,5 @@ private:
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_SOURCE_UPDATEHANDLER_H__

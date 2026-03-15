@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_ISTRINGRESULT_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_ISTRINGRESULT_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -78,3 +80,5 @@ DECLARE_CLASS_IID (IString, 0xF99DB7A3, 0x0FC14821, 0x800B0CF9, 0x8E348EDF)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_ISTRINGRESULT_H__

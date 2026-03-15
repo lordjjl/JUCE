@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEW_H__
+#define __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEW_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/typesizecheck.h"
@@ -285,3 +287,5 @@ DECLARE_CLASS_IID (IRunLoop, 0x18C35366, 0x97764F1A, 0x9C5B8385, 0x7A871389)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_GUI_IPLUGVIEW_H__

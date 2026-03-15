@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_HOSTCLASSES_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_HOSTCLASSES_H__
 
 #include "public.sdk/source/vst/hosting/pluginterfacesupport.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
@@ -118,3 +120,5 @@ private:
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_HOSTCLASSES_H__

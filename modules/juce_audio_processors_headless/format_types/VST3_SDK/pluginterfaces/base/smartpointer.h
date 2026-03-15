@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_SMARTPOINTER_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_SMARTPOINTER_H__
 
 #include "pluginterfaces/base/fplatform.h"
 #if SMTG_CPP11_STDLIBSUPPORT
@@ -384,3 +386,5 @@ Used<T> toUsed (T* obj) { return Detail::Adopt::toOwnerType<Used> (obj); }
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_SMARTPOINTER_H__

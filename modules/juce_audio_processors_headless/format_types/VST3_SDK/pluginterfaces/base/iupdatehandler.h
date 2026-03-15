@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_IUPDATEHANDLER_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_IUPDATEHANDLER_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -96,3 +98,5 @@ DECLARE_CLASS_IID (IDependent, 0xF52B7AAE, 0xDE72416d, 0x8AF18ACE, 0x9DD7BD5E)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_IUPDATEHANDLER_H__

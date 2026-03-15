@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_PLUGINVIEW_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_PLUGINVIEW_H__
 
 #include "pluginterfaces/gui/iplugview.h"
 #include "base/source/fobject.h"
@@ -114,3 +116,5 @@ protected:
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_PLUGINVIEW_H__

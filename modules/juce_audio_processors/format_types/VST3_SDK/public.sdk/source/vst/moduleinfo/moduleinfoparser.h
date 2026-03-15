@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOPARSER_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOPARSER_H__
 
 #include "moduleinfo.h"
 #include <iostream>
@@ -66,3 +68,5 @@ std::optional<ModuleInfo::CompatibilityList> parseCompatibilityJson (std::string
 
 //------------------------------------------------------------------------
 } // Steinberg::ModuelInfoLib
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOPARSER_H__

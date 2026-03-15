@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_IPLUGINBASE_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_IPLUGINBASE_H__
 
 #include "funknown.h"
 #include "fstrdefs.h"
@@ -518,3 +520,5 @@ extern "C"
 	SMTG_EXPORT_SYMBOL Steinberg::IPluginFactory* PLUGIN_API GetPluginFactory ();
 	typedef Steinberg::IPluginFactory* (PLUGIN_API *GetFactoryProc) ();
 }
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_IPLUGINBASE_H__

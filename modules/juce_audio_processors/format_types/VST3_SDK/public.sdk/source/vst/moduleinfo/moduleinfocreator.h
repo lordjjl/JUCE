@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOCREATOR_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOCREATOR_H__
 
 #include "moduleinfo.h"
 #include "public.sdk/source/vst/hosting/module.h"
@@ -65,3 +67,5 @@ void outputJson (const ModuleInfo& info, std::ostream& output);
 
 //------------------------------------------------------------------------
 } // Steinberg::ModuelInfoLib
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_MODULEINFOCREATOR_H__

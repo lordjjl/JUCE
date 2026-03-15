@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_CLASSFACTORYHELPERS_H__
+#define __STEINBERG_BASE_SOURCE_CLASSFACTORYHELPERS_H__
 
 //------------------------------------------------------------------------------
 // Helper Macros. Not intended for direct use.
@@ -85,3 +87,5 @@
 #define META_CLASS_SINGLE(className, Interface) \
 	SINGLE_CREATE_FUNC (className)              \
 	_META_CLASS_IFACE (className, Interface)
+
+#endif // __STEINBERG_BASE_SOURCE_CLASSFACTORYHELPERS_H__

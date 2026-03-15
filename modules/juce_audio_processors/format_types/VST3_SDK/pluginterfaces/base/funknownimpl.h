@@ -16,6 +16,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWNIMPL_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWNIMPL_H__
 
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/fplatform.h"
@@ -468,3 +470,5 @@ using FUnknownImpl::getTUID;
 //------------------------------------------------------------------------
 } // namespace U
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWNIMPL_H__

@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FUTILS_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FUTILS_H__
 
 #include "pluginterfaces/base/ftypes.h"
 
@@ -105,3 +107,5 @@ inline int32 FromNormalized (const T& norm, const int32 numSteps)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FUTILS_H__

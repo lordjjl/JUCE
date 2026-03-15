@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_TYPESIZECHECK_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_TYPESIZECHECK_H__
 
 #include "pluginterfaces/base/fplatform.h"
 
@@ -53,3 +55,5 @@
 // need static_assert
 #define SMTG_TYPE_SIZE_CHECK(Type, Platform64Size, MacOS32Size, Win32Size, Linux32Size)
 #endif
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_TYPESIZECHECK_H__

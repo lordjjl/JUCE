@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_IPERSISTENT_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_IPERSISTENT_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -158,3 +160,5 @@ DECLARE_CLASS_IID (IAttributes2, 0x1382126A, 0xFECA4871, 0x97D52A45, 0xB042AE99)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_IPERSISTENT_H__

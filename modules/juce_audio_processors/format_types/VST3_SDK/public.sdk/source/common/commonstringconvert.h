@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_COMMONSTRINGCONVERT_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_COMMONSTRINGCONVERT_H__
 
 #include <cstdint>
 #include <string>
@@ -92,3 +94,5 @@ std::u16string toString (NumberT value)
 //------------------------------------------------------------------------
 } // namespace StringConvert
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_COMMONSTRINGCONVERT_H__

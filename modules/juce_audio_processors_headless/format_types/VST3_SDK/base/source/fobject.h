@@ -40,6 +40,8 @@
 	Basic Object implementing FUnknown. */
 //------------------------------------------------------------------------
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_FOBJECT_H__
+#define __STEINBERG_BASE_SOURCE_FOBJECT_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/iupdatehandler.h"
@@ -575,3 +577,5 @@ IUNKNOWN_REFCOUNT_METHODS(BaseClass)
 ///@}
 
 #endif // COM_COMPATIBLE
+
+#endif // __STEINBERG_BASE_SOURCE_FOBJECT_H__

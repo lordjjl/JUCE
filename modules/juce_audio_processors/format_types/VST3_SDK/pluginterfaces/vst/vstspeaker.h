@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_VSTSPEAKER_H__
+#define __STEINBERG_PLUGINTERFACES_VST_VSTSPEAKER_H__
 
 #include "pluginterfaces/vst/vsttypes.h"
 
@@ -1330,3 +1332,5 @@ inline CString getSpeakerShortName (const SpeakerArrangement& arr, int32 index)
 } // namespace SpeakerArr
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_VSTSPEAKER_H__

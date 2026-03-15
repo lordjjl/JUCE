@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_READFILE_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_READFILE_H__
 
 #include <string>
 
@@ -52,3 +54,5 @@ std::string readFile (const std::string& path);
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_COMMON_READFILE_H__

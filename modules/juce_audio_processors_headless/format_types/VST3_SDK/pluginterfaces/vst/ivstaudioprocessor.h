@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTAUDIOPROCESSOR_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTAUDIOPROCESSOR_H__
 
 #include "ivstcomponent.h"
 #include "vstspeaker.h"
@@ -432,3 +434,5 @@ DECLARE_CLASS_IID (IProcessContextRequirements, 0x2A654303, 0xEF764E3D, 0x95B5FE
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTAUDIOPROCESSOR_H__

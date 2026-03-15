@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_JSONCXX_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_JSONCXX_H__
 
 #include "json.h"
 #include <cassert>
@@ -425,3 +427,5 @@ inline std::string_view errorToString (json_parse_error_e error)
 
 //------------------------------------------------------------------------
 } // JSON
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_MODULEINFO_JSONCXX_H__

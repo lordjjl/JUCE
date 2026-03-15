@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_FSTRING_H__
+#define __STEINBERG_BASE_SOURCE_FSTRING_H__
 
 #include "pluginterfaces/base/ftypes.h"
 #include "pluginterfaces/base/fstrdefs.h"
@@ -776,3 +778,5 @@ public:
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_SOURCE_FSTRING_H__

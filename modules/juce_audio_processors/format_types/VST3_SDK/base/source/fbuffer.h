@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_FBUFFER_H__
+#define __STEINBERG_BASE_SOURCE_FBUFFER_H__
 
 #include "pluginterfaces/base/ftypes.h"
 #include <cstring> 
@@ -304,3 +306,5 @@ inline bool Buffer::prependString (tchar c)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_SOURCE_FBUFFER_H__

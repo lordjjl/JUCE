@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTMESSAGE_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTMESSAGE_H__
 
 #include "pluginterfaces/vst/ivstattributes.h"
 
@@ -95,3 +97,5 @@ DECLARE_CLASS_IID (IConnectionPoint, 0x70A4156F, 0x6E6E4026, 0x989148BF, 0xAA60D
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTMESSAGE_H__

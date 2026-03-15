@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTHOSTAPPLICATION_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTHOSTAPPLICATION_H__
 
 #include "pluginterfaces/vst/ivstmessage.h"
 
@@ -161,3 +163,5 @@ DECLARE_CLASS_IID (IVst3WrapperMPESupport, 0x44149067, 0x42CF4BF9, 0x8800B750, 0
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTHOSTAPPLICATION_H__

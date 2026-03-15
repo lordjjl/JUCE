@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTEDITCONTROLLER_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTEDITCONTROLLER_H__
 
 #include "public.sdk/source/vst/vstcomponentbase.h"
 #include "public.sdk/source/vst/vstparameters.h"
@@ -372,3 +374,5 @@ protected:
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_VSTEDITCONTROLLER_H__

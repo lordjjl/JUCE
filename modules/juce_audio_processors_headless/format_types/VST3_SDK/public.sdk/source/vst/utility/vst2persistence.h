@@ -34,6 +34,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_VST2PERSISTENCE_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_VST2PERSISTENCE_H__
 
 #include "public.sdk/source/vst/utility/optional.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -121,3 +123,5 @@ Optional<Vst2xProgram> tryVst2ProgramLoad (Steinberg::IBStream& stream,
 
 //------------------------------------------------------------------------
 } // VST3
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_UTILITY_VST2PERSISTENCE_H__

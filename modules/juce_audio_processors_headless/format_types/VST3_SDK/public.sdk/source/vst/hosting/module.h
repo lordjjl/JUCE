@@ -35,6 +35,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_MODULE_H__
+#define __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_MODULE_H__
 
 #include "../utility/uid.h"
 #include "pluginterfaces/base/ipluginbase.h"
@@ -212,3 +214,5 @@ inline Steinberg::IPtr<T> PluginFactory::createInstance (const UID& classID) con
 //------------------------------------------------------------------------
 } // Hosting
 } // VST3
+
+#endif // __STEINBERG_PUBLIC_SDK_SOURCE_VST_HOSTING_MODULE_H__

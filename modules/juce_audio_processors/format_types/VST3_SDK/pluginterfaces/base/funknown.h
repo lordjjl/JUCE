@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWN_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWN_H__
 
 #include "pluginterfaces/base/fplatform.h"
 #include "pluginterfaces/base/ftypes.h"
@@ -557,3 +559,5 @@ struct FReleaser
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_FUNKNOWN_H__

@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTEDITCONTROLLER_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTEDITCONTROLLER_H__
 
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -718,3 +720,5 @@ DECLARE_CLASS_IID (IComponentHandlerSystemTime, 0xF9E53056, 0xD1554CD5, 0xB7695E
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTEDITCONTROLLER_H__

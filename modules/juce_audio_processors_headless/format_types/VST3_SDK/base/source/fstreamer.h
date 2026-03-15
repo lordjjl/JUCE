@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_BASE_SOURCE_FSTREAMER_H__
+#define __STEINBERG_BASE_SOURCE_FSTREAMER_H__
 
 #include "pluginterfaces/base/funknown.h"
 
@@ -240,3 +242,5 @@ protected:
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_BASE_SOURCE_FSTREAMER_H__

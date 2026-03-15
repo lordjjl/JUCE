@@ -36,6 +36,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTTESTPLUGPROVIDER_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTTESTPLUGPROVIDER_H__
 
 #include "pluginterfaces/base/istringresult.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -107,3 +109,5 @@ DECLARE_CLASS_IID (ITestPlugProvider2, 0xC7C75364, 0x7B8343AC, 0xA4495B0A, 0x3E5
 //------------------------------------------------------------------------
 } // Vst
 } // Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTTESTPLUGPROVIDER_H__

@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTPARAMETERFUNCTIONNAME_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTPARAMETERFUNCTIONNAME_H__
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/vst/vsttypes.h"
@@ -149,3 +151,5 @@ DECLARE_CLASS_IID (IParameterFunctionName, 0x6D21E1DC, 0x91199D4B, 0xA2A02FEF, 0
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTPARAMETERFUNCTIONNAME_H__

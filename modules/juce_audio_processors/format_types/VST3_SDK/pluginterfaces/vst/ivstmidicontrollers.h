@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTMIDICONTROLLERS_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTMIDICONTROLLERS_H__
 
 //------------------------------------------------------------------------
 namespace Steinberg {
@@ -116,3 +118,5 @@ enum ControllerNumbers
 //------------------------------------------------------------------------
 } // namespace Vst
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTMIDICONTROLLERS_H__

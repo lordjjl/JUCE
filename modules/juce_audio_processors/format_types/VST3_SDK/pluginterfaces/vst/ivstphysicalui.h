@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_IVSTPHYSICALUI_H__
+#define __STEINBERG_PLUGINTERFACES_VST_IVSTPHYSICALUI_H__
 
 #include "pluginterfaces/vst/ivstnoteexpression.h"
 
@@ -167,3 +169,5 @@ DECLARE_CLASS_IID (INoteExpressionPhysicalUIMapping, 0xB03078FF, 0x94D24AC8, 0x9
 //------------------------------------------------------------------------
 #include "pluginterfaces/base/falignpop.h"
 //------------------------------------------------------------------------
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_IVSTPHYSICALUI_H__

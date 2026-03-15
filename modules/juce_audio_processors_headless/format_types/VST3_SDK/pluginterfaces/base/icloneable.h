@@ -15,6 +15,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_BASE_ICLONEABLE_H__
+#define __STEINBERG_PLUGINTERFACES_BASE_ICLONEABLE_H__
 
 #include "funknown.h"
 
@@ -39,3 +41,5 @@ DECLARE_CLASS_IID (ICloneable, 0xD45406B9, 0x3A2D4443, 0x9DAD9BA9, 0x85A1454B)
 
 //------------------------------------------------------------------------
 } // namespace Steinberg
+
+#endif // __STEINBERG_PLUGINTERFACES_BASE_ICLONEABLE_H__

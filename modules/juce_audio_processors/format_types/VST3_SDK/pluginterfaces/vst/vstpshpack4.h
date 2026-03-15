@@ -16,6 +16,8 @@
 //-----------------------------------------------------------------------------
 
 #pragma once
+#ifndef __STEINBERG_PLUGINTERFACES_VST_VSTPSHPACK4_H__
+#define __STEINBERG_PLUGINTERFACES_VST_VSTPSHPACK4_H__
 
 //----------------------------------------------------------------------------------------------
 #if defined __BORLANDC__ 
@@ -28,3 +30,5 @@
 	#pragma pack(push)
 	#pragma pack(4)
 #endif
+
+#endif // __STEINBERG_PLUGINTERFACES_VST_VSTPSHPACK4_H__
