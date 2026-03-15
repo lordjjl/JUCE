@@ -566,10 +566,23 @@ namespace detail
     inline bool isHeadlessMessageThreadCurrent() noexcept
     {
     #ifdef BATCHY_HEADLESS_SUPPORT
-        return batchy::threading::HeadlessMessageThread::getActive() != nullptr;
+        if (auto* active = batchy::threading::HeadlessMessageThread::getActive())
+            return active->getThreadId() == std::this_thread::get_id();
+
+        return false;
     #else
         return false;
     #endif
+    }
+
+    // Allow threads with verified exclusive graph access (offline render clones,
+    // batch operations) to satisfy JUCE_ASSERT_MESSAGE_THREAD. Set by Batchy's
+    // ScopedExclusiveAccessBypass when the caller has verified exclusive access.
+    inline thread_local bool t_exclusiveAccessThread = false;
+
+    inline bool isExclusiveAccessThreadCurrent() noexcept
+    {
+        return t_exclusiveAccessThread;
     }
 }
 
@@ -588,7 +601,7 @@ namespace detail
     created, which could happen if you accidentally invoke it during a static constructor.
 */
 #define JUCE_ASSERT_MESSAGE_THREAD \
-    jassert (juce::MessageManager::existsAndIsCurrentThread() || juce::detail::isHeadlessMessageThreadCurrent());
+    jassert (juce::MessageManager::existsAndIsCurrentThread() || juce::detail::isHeadlessMessageThreadCurrent() || juce::detail::isExclusiveAccessThreadCurrent());
 
 /** This macro is used to catch unsafe use of functions which expect to not be called
     outside the lifetime of the MessageManager.
