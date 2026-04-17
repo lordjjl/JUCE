@@ -482,16 +482,20 @@ public:
 
         auto appliedSettings = requestedCopy;
 
-        if (appliedSettings.has_value() && appliedSettings->precision == AudioProcessor::doublePrecision)
-        {
-            const auto allSupportDouble = std::all_of (n.getNodes().begin(), n.getNodes().end(), [] (const auto* node)
-            {
-                return node->getProcessor()->supportsDoublePrecisionProcessing();
-            });
-
-            if (! allSupportDouble)
-                appliedSettings->precision = AudioProcessor::singlePrecision;
-        }
+        // Batchy fork (2026-04-16): do NOT downgrade the graph-wide precision when
+        // any node lacks double-precision support. Upstream JUCE 8.0.8 (commit
+        // 5297df9995) replaced the graph-wide downgrade with per-node conversion:
+        // a node that only supports single-precision is called with a temporary
+        // float buffer (see ProcessOp::callProcess(AudioBuffer<double>&) below —
+        // the `temporaryBuffer.makeCopyOf` branch), while the graph as a whole
+        // stays in doublePrecision and builds a GraphRenderSequence<double>.
+        // This `_headless` fork already imports the per-node branch, so keeping
+        // the old graph-wide downgrade broke the upstream "nodes use double
+        // precision if supported" test imported alongside it (process<double>
+        // couldn't find a double RenderSequence and `jassertfalse` fired at
+        // "Not prepared for this audio format!").  Per-node precision is still
+        // set correctly below (line ~520) via
+        // `nodeProcessor->setProcessingPrecision(precision)`.
 
         const auto settingsChanged = appliedSettings != previouslyApplied;
 

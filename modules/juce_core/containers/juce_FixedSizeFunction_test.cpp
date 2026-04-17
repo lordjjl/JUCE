@@ -319,28 +319,60 @@ public:
 
         beginTest ("Functions can sink move-only parameters");
         {
-            JUCE_FAIL_ON_ALLOCATION_IN_SCOPE;
-
-            using FnA = FixedSizeFunction<64, int (std::unique_ptr<int>)>;
-
+            // Batchy fork (2026-04-16): this test's invariant is that
+            // FixedSizeFunction itself never allocates while sinking rvalue
+            // parameters. The allocation checker (enabled by
+            // JUCE_ENABLE_ALLOCATION_HOOKS=1) globally counts every new/delete
+            // on the thread, including the test's own unique_ptr setup AND the
+            // destructor of the unique_ptr parameter when FixedSizeFunction::
+            // operator()'s by-value arg goes out of scope inside the lambda.
+            //
+            // To keep the allocations/deletes that belong to the TEST SETUP
+            // out of the checker's scope:
+            //   - std::make_unique is hoisted above JUCE_FAIL_ON_ALLOCATION_IN_SCOPE
+            //   - Ownership is transferred into `captured*` unique_ptrs held
+            //     outside the scope, so the by-value parameter inside each
+            //     lambda is empty by the time it goes out of scope — its
+            //     destructor becomes a no-op (unique_ptr skips `delete` on a
+            //     null pointer). What remains inside the scope exercises only
+            //     FixedSizeFunction's own move-and-invoke path, which is what
+            //     the test is meant to verify.
             auto value = 5;
-            auto ptr = std::make_unique<int> (value);
-
-            FnA fnA = [] (std::unique_ptr<int> p) { return *p; };
-
-            expect (value == fnA (std::move (ptr)));
-
-            using FnB = FixedSizeFunction<64, void (std::unique_ptr<int>&&)>;
-
-            FnB fnB = [&value] (std::unique_ptr<int>&& p)
-            {
-                auto x = std::move (p);
-                value = *x;
-            };
+            auto ptr  = std::make_unique<int> (value);
 
             const auto newValue = 10;
-            fnB (std::make_unique<int> (newValue));
-            expect (value == newValue);
+            auto ptr2 = std::make_unique<int> (newValue);
+
+            // Owned outside the allocation-checked scope so their eventual
+            // destructors (and resulting `delete`) fire after the checker
+            // has already finished tallying.
+            std::unique_ptr<int> captured1;
+            std::unique_ptr<int> captured2;
+
+            {
+                JUCE_FAIL_ON_ALLOCATION_IN_SCOPE;
+
+                using FnA = FixedSizeFunction<64, int (std::unique_ptr<int>)>;
+
+                FnA fnA = [&captured1] (std::unique_ptr<int> p)
+                {
+                    captured1 = std::move (p);
+                    return *captured1;
+                };
+
+                expect (value == fnA (std::move (ptr)));
+
+                using FnB = FixedSizeFunction<64, void (std::unique_ptr<int>&&)>;
+
+                FnB fnB = [&captured2, &value] (std::unique_ptr<int>&& p)
+                {
+                    captured2 = std::move (p);
+                    value = *captured2;
+                };
+
+                fnB (std::move (ptr2));
+                expect (value == newValue);
+            }
         }
 
         beginTest ("Functions be converted from smaller functions");
