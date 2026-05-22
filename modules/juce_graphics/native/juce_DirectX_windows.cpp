@@ -270,7 +270,12 @@ ComSmartPtr<ID2D1DeviceContext1> Direct2DDeviceContext::create (ComSmartPtr<ID2D
         return {};
     }
 
+   #if BATCHY_WINDOWS_D2D_CLEARTYPE_TEXT
+    result->SetTextAntialiasMode (D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+   #else
     result->SetTextAntialiasMode (D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+   #endif
+
     result->SetAntialiasMode (D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     result->SetUnitMode (D2D1_UNIT_MODE_PIXELS);
 

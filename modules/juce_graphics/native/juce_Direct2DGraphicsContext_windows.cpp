@@ -1265,7 +1265,13 @@ void Direct2DGraphicsContext::drawGlyphs (Span<const uint16_t> glyphNumbers,
     };
 
     if (! tryDrawColourGlyphs())
+    {
+       #if BATCHY_WINDOWS_D2D_CLEARTYPE_TEXT
+        deviceContext->DrawGlyphRun (baselineOrigin, &directWriteGlyphRun, brush, DWRITE_MEASURING_MODE_GDI_CLASSIC);
+       #else
         deviceContext->DrawGlyphRun (baselineOrigin, &directWriteGlyphRun, brush);
+       #endif
+    }
 
     if (! onlyTranslated)
         getPimpl()->resetDeviceContextTransform();
