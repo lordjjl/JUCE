@@ -123,7 +123,9 @@ namespace detail
 enum class WebInputStreamDiagnosticEventType : std::uint8_t
 {
     taskRegistered,
-    responseBodyWait
+    responseBodyWait,
+    taskRetired,
+    tokenReleased
 };
 
 struct WebInputStreamDiagnosticEvent
@@ -133,6 +135,23 @@ struct WebInputStreamDiagnosticEvent
     std::uint64_t taskIdentifier = 0;
     std::int64_t requestUrlHash = 0;
     std::int64_t bytesConsumedByRead = 0;
+    std::uint64_t ownerId = 0;
+};
+
+struct WebInputStreamDiagnosticSnapshot
+{
+    std::uint64_t ownerId = 0;
+    std::uint64_t ownerConstructionCount = 0;
+    std::uint64_t acceptingGenerationId = 0;
+    std::uint64_t totalGenerationConstructions = 0;
+    std::uint64_t liveGenerationCount = 0;
+    std::uint64_t liveListenerCount = 0;
+    std::uint64_t activeCallbackCount = 0;
+    std::uint64_t inFlightDiagnosticLifecyclePublicationCount = 0;
+    std::uint64_t liveTokenLeaseCount = 0;
+    std::uint64_t totalRegisteredTaskCount = 0;
+    std::uint64_t totalRetiredTaskCount = 0;
+    std::uint64_t totalReleasedTokenCount = 0;
 };
 
 /** Internal, allocation-free lifecycle observation. The sink may run while a
@@ -173,7 +192,16 @@ static void publishWebInputStreamDiagnosticEvent (WebInputStreamDiagnosticEvent 
     if (const auto sink = getWebInputStreamDiagnosticSink().load (std::memory_order_acquire))
         sink (event);
 }
+
+WebInputStreamDiagnosticSnapshot getWebInputStreamDiagnosticSnapshot();
+WebInputStreamDiagnosticSnapshot waitForWebInputStreamDiagnosticQuiescence (std::chrono::milliseconds timeout);
 } // namespace detail
+
+namespace
+{
+std::atomic<std::uint64_t> nextWebInputStreamDiagnosticOwnerId { 1 };
+std::atomic<std::uint64_t> webInputStreamDiagnosticOwnerConstructionCount { 0 };
+}
 
 //==============================================================================
 struct SessionListener
@@ -209,6 +237,7 @@ class SharedSession
         SessionListener* listener = nullptr;
         size_t activeCallbacks = 0;
         bool terminalCallbackStarted = false;
+        std::int64_t requestUrlHash = 0;
     };
 
     struct SessionGeneration
@@ -291,14 +320,14 @@ class SharedSession
             : owner (ownerToUse)
         {
             const std::scoped_lock lock { owner.mutex };
-            ++owner.activeCallbacks;
+            ++owner.activeCallbackCount;
         }
 
         ~ScopedCallback()
         {
             const std::scoped_lock lock { owner.mutex };
-            jassert (owner.activeCallbacks > 0);
-            --owner.activeCallbacks;
+            jassert (owner.activeCallbackCount > 0);
+            --owner.activeCallbackCount;
             owner.condvar.notify_all();
         }
 
@@ -308,8 +337,16 @@ class SharedSession
 
 public:
     SharedSession()
+        : ownerId (nextWebInputStreamDiagnosticOwnerId.fetch_add (1, std::memory_order_relaxed))
     {
+        jassert (ownerId > 0);
+        webInputStreamDiagnosticOwnerConstructionCount.fetch_add (1, std::memory_order_relaxed);
         DelegateClass::setState (delegate.get(), this);
+    }
+
+    std::uint64_t getOwnerId() const noexcept
+    {
+        return ownerId;
     }
 
     ~SharedSession()
@@ -319,7 +356,7 @@ public:
         {
             const std::scoped_lock lock { mutex };
             lifecycle = Lifecycle::shuttingDown;
-            acceptingGeneration = nullptr;
+            setAcceptingGenerationLocked (nullptr);
 
             for (auto& generation : generations)
                 if (auto sessionToInvalidate = beginInvalidationLocked (*generation))
@@ -332,7 +369,7 @@ public:
         sessionsToInvalidate.clear();
 
         std::unique_lock lock { mutex };
-        condvar.wait (lock, [&] { return generations.empty() && activeCallbacks == 0; });
+        condvar.wait (lock, [&] { return generations.empty() && activeCallbackCount == 0; });
         DelegateClass::setState (delegate.get(), nullptr);
     }
 
@@ -365,10 +402,12 @@ public:
             {
                 const auto identifier = [task.get() taskIdentifier];
                 const auto inserted = generation->listeners.emplace (
-                    identifier, ListenerRecord { listener, 0, false });
+                    identifier, ListenerRecord { listener, 0, false, requestUrlHash });
 
                 if (inserted.second)
                 {
+                    ++liveListenerCount;
+                    ++totalRegisteredTaskCount;
                     result.task = std::move (task);
                     result.generation = generation->generation;
                     result.identifier = identifier;
@@ -394,7 +433,8 @@ public:
                   result.generation,
                   static_cast<std::uint64_t> (result.identifier),
                   result.requestUrlHash,
-                  0 });
+                  0,
+                  ownerId });
         }
 
         return result;
@@ -411,9 +451,71 @@ public:
                       {
                           const auto* generation = findGenerationLocked (task.generation);
 
-                          return generation == nullptr
-                              || generation->listeners.find (task.identifier) == generation->listeners.end();
+                          return (generation == nullptr
+                                  || generation->listeners.find (task.identifier) == generation->listeners.end())
+                              && inFlightDiagnosticLifecyclePublicationCount == 0;
                       });
+    }
+
+    void acquireTokenLease() noexcept
+    {
+        const std::scoped_lock lock { mutex };
+        ++liveTokenLeaseCount;
+    }
+
+    void releaseTokenLease (const RegisteredSessionTask& task) noexcept
+    {
+        detail::WebInputStreamDiagnosticEvent releasedEvent;
+        bool released = false;
+
+        {
+            const std::scoped_lock lock { mutex };
+            jassert (liveTokenLeaseCount > 0);
+
+            if (liveTokenLeaseCount > 0)
+            {
+                ++inFlightDiagnosticLifecyclePublicationCount;
+                --liveTokenLeaseCount;
+                ++totalReleasedTokenCount;
+                releasedEvent.type = detail::WebInputStreamDiagnosticEventType::tokenReleased;
+                releasedEvent.generation = task.generation;
+                releasedEvent.taskIdentifier = static_cast<std::uint64_t> (task.identifier);
+                releasedEvent.requestUrlHash = task.requestUrlHash;
+                releasedEvent.ownerId = ownerId;
+                released = true;
+            }
+        }
+
+        if (released)
+        {
+            detail::publishWebInputStreamDiagnosticEvent (releasedEvent);
+
+            const std::scoped_lock lock { mutex };
+            jassert (inFlightDiagnosticLifecyclePublicationCount > 0);
+            --inFlightDiagnosticLifecyclePublicationCount;
+            condvar.notify_all();
+        }
+    }
+
+    detail::WebInputStreamDiagnosticSnapshot getDiagnosticSnapshot()
+    {
+        const std::scoped_lock lock { mutex };
+        return getDiagnosticSnapshotLocked();
+    }
+
+    detail::WebInputStreamDiagnosticSnapshot waitForDiagnosticQuiescence (std::chrono::milliseconds timeout)
+    {
+        std::unique_lock lock { mutex };
+        condvar.wait_for (lock,
+                          timeout,
+                          [&]
+                          {
+                              return liveListenerCount == 0
+                                  && activeCallbackCount == 0
+                                  && liveTokenLeaseCount == 0
+                                  && inFlightDiagnosticLifecyclePublicationCount == 0;
+                          });
+        return getDiagnosticSnapshotLocked();
     }
 
 private:
@@ -442,7 +544,7 @@ private:
             generation->invalidationCallbackReceived = true;
 
             if (acceptingGeneration == generation)
-                acceptingGeneration = nullptr;
+                setAcceptingGenerationLocked (nullptr);
 
             for (auto& [identifier, record] : generation->listeners)
             {
@@ -577,7 +679,9 @@ private:
 
         auto* result = generation.get();
         generations.push_back (std::move (generation));
-        acceptingGeneration = result;
+        ++totalGenerationConstructions;
+        ++liveGenerationCount;
+        setAcceptingGenerationLocked (result);
         return result;
     }
 
@@ -589,7 +693,7 @@ private:
         generation.invalidationRequested = true;
 
         if (acceptingGeneration == &generation)
-            acceptingGeneration = nullptr;
+            setAcceptingGenerationLocked (nullptr);
 
         return NSUniquePtr<NSURLSession> { [generation.session.get() retain] };
     }
@@ -616,6 +720,30 @@ private:
         return iter != generations.end() ? iter->get() : nullptr;
     }
 
+    void setAcceptingGenerationLocked (SessionGeneration* generation) noexcept
+    {
+        acceptingGeneration = generation;
+        acceptingGenerationId = generation != nullptr ? generation->generation : 0;
+    }
+
+    detail::WebInputStreamDiagnosticSnapshot getDiagnosticSnapshotLocked() const noexcept
+    {
+        detail::WebInputStreamDiagnosticSnapshot result;
+        result.ownerId = ownerId;
+        result.ownerConstructionCount = webInputStreamDiagnosticOwnerConstructionCount.load (std::memory_order_acquire);
+        result.acceptingGenerationId = acceptingGenerationId;
+        result.totalGenerationConstructions = totalGenerationConstructions;
+        result.liveGenerationCount = liveGenerationCount;
+        result.liveListenerCount = liveListenerCount;
+        result.activeCallbackCount = activeCallbackCount;
+        result.inFlightDiagnosticLifecyclePublicationCount = inFlightDiagnosticLifecyclePublicationCount;
+        result.liveTokenLeaseCount = liveTokenLeaseCount;
+        result.totalRegisteredTaskCount = totalRegisteredTaskCount;
+        result.totalRetiredTaskCount = totalRetiredTaskCount;
+        result.totalReleasedTokenCount = totalReleasedTokenCount;
+        return result;
+    }
+
     std::unique_ptr<SessionGeneration> takeDrainedGenerationLocked (std::uint64_t generationId)
     {
         const auto iter = std::find_if (generations.begin(),
@@ -633,10 +761,12 @@ private:
         }
 
         if (acceptingGeneration == iter->get())
-            acceptingGeneration = nullptr;
+            setAcceptingGenerationLocked (nullptr);
 
         auto result = std::move (*iter);
         generations.erase (iter);
+        jassert (liveGenerationCount > 0);
+        --liveGenerationCount;
         return result;
     }
 
@@ -715,23 +845,28 @@ private:
 
         static void setState (NSObject* self, SharedSession* state)  { object_setInstanceVariable (self, "state", state); }
         static SharedSession* getState (NSObject* self)              { return getIvar<SharedSession*> (self, "state"); }
-
-        static DelegateClass& get()
-        {
-            static DelegateClass cls;
-            return cls;
-        }
     };
 
+    const std::uint64_t ownerId;
     std::mutex mutex;
     std::condition_variable condvar;
 
-    NSUniquePtr<NSObject<NSURLSessionTaskDelegate>> delegate { [DelegateClass::get().createInstance() init] };
+    DelegateClass delegateClass;
+    NSUniquePtr<NSObject<NSURLSessionTaskDelegate>> delegate { [delegateClass.createInstance() init] };
     std::vector<std::unique_ptr<SessionGeneration>> generations;
     SessionGeneration* acceptingGeneration = nullptr;
+    std::uint64_t acceptingGenerationId = 0;
     std::uint64_t nextGeneration = 1;
+    std::uint64_t totalGenerationConstructions = 0;
+    std::uint64_t liveGenerationCount = 0;
+    std::uint64_t liveListenerCount = 0;
+    std::uint64_t inFlightDiagnosticLifecyclePublicationCount = 0;
+    std::uint64_t liveTokenLeaseCount = 0;
+    std::uint64_t totalRegisteredTaskCount = 0;
+    std::uint64_t totalRetiredTaskCount = 0;
+    std::uint64_t totalReleasedTokenCount = 0;
     Lifecycle lifecycle = Lifecycle::running;
-    size_t activeCallbacks = 0;
+    std::uint64_t activeCallbackCount = 0;
 };
 
 void SharedSession::ListenerCallback::reset() noexcept
@@ -749,6 +884,9 @@ void SharedSession::releaseListenerCallback (std::uint64_t generationId,
                                              NSUInteger identifier) noexcept
 {
     std::unique_ptr<SessionGeneration> generationToRelease;
+    detail::WebInputStreamDiagnosticEvent retiredEvent;
+    bool retired = false;
+    bool shouldNotify = false;
 
     {
         const std::scoped_lock lock { mutex };
@@ -756,6 +894,7 @@ void SharedSession::releaseListenerCallback (std::uint64_t generationId,
 
         if (generation != nullptr)
         {
+            shouldNotify = true;
             const auto iter = generation->listeners.find (identifier);
 
             if (iter != generation->listeners.end())
@@ -766,43 +905,95 @@ void SharedSession::releaseListenerCallback (std::uint64_t generationId,
                 if (iter->second.activeCallbacks == 0
                     && iter->second.terminalCallbackStarted)
                 {
+                    ++inFlightDiagnosticLifecyclePublicationCount;
+                    retiredEvent.type = detail::WebInputStreamDiagnosticEventType::taskRetired;
+                    retiredEvent.generation = generationId;
+                    retiredEvent.taskIdentifier = static_cast<std::uint64_t> (identifier);
+                    retiredEvent.requestUrlHash = iter->second.requestUrlHash;
+                    retiredEvent.ownerId = ownerId;
                     generation->listeners.erase (iter);
+                    jassert (liveListenerCount > 0);
+                    --liveListenerCount;
+                    ++totalRetiredTaskCount;
+                    retired = true;
                 }
             }
 
             generationToRelease = takeDrainedGenerationLocked (generationId);
-            condvar.notify_all();
         }
     }
+
+    if (retired)
+    {
+        detail::publishWebInputStreamDiagnosticEvent (retiredEvent);
+
+        const std::scoped_lock lock { mutex };
+        jassert (inFlightDiagnosticLifecyclePublicationCount > 0);
+        --inFlightDiagnosticLifecyclePublicationCount;
+        condvar.notify_all();
+    }
+
+    if (shouldNotify)
+        condvar.notify_all();
 }
 
-/** Keep one SharedSession alive for the process lifetime. A scoped
-    SharedResourcePointer alone destroys and recreates NSURLSession whenever
-    the last WebInputStream in a sequential workload goes away, which churns
-    CFNetwork resources and defeats healthy-generation reuse. */
-static SharedResourcePointer<SharedSession>& getProcessSharedSession()
+/** Keep one SharedSession alive for the process lifetime. The longer-lived
+    owner amortizes healthy generation and CFNetwork transport state across
+    sequential WebInputStreams; each TaskToken retains a strong handle to the
+    exact owner used to register its task, preserving lifetime and provenance. */
+static std::shared_ptr<SharedSession> getProcessSharedSession()
 {
-    static SharedResourcePointer<SharedSession> session;
+    static const auto session = std::make_shared<SharedSession>();
     return session;
 }
+
+namespace detail
+{
+WebInputStreamDiagnosticSnapshot getWebInputStreamDiagnosticSnapshot()
+{
+    return getProcessSharedSession()->getDiagnosticSnapshot();
+}
+
+WebInputStreamDiagnosticSnapshot waitForWebInputStreamDiagnosticQuiescence (std::chrono::milliseconds timeout)
+{
+    return getProcessSharedSession()->waitForDiagnosticQuiescence (timeout);
+}
+} // namespace detail
 
 class TaskToken
 {
 public:
     TaskToken() = default;
 
-    explicit TaskToken (NSURLRequest* request, SessionListener* l)
-        : task ([&]
-                {
-                    auto& session = getProcessSharedSession();
-                    return session->addTask (request, l);
-                }())
+    explicit TaskToken (std::shared_ptr<SharedSession> sessionToUse,
+                        NSURLRequest* request,
+                        SessionListener* l)
+        : session (std::move (sessionToUse))
     {
+        if (session == nullptr)
+            return;
+
+        task = session->addTask (request, l);
+
+        if (! task)
+        {
+            session.reset();
+            return;
+        }
+
+        session->acquireTokenLease();
+        tokenLeaseHeld = true;
+
         if (auto* t = task.task.get())
             [t resume];
     }
 
-    TaskToken (TaskToken&&) noexcept = default;
+    TaskToken (TaskToken&& other) noexcept
+        : session (std::move (other.session)),
+          task (std::move (other.task)),
+          tokenLeaseHeld (std::exchange (other.tokenLeaseHeld, false))
+    {
+    }
 
     ~TaskToken()
     {
@@ -814,7 +1005,10 @@ public:
         if (this != &other)
         {
             reset();
+
+            session = std::move (other.session);
             task = std::move (other.task);
+            tokenLeaseHeld = std::exchange (other.tokenLeaseHeld, false);
         }
 
         return *this;
@@ -830,7 +1024,7 @@ public:
 
     void publishResponseBodyWait (std::int64_t bytesConsumedByRead) const noexcept
     {
-        if (! task)
+        if (! task || session == nullptr)
             return;
 
         detail::publishWebInputStreamDiagnosticEvent (
@@ -838,21 +1032,32 @@ public:
               task.generation,
               static_cast<std::uint64_t> (task.identifier),
               task.requestUrlHash,
-              bytesConsumedByRead });
+              bytesConsumedByRead,
+              session != nullptr ? session->getOwnerId() : 0 });
     }
 
 private:
     void reset()
     {
-        if (! task)
-            return;
+        if (task && session != nullptr)
+        {
+            session->removeTask (task);
 
-        auto& session = getProcessSharedSession();
-        session->removeTask (task);
+            if (std::exchange (tokenLeaseHeld, false))
+                session->releaseTokenLease (task);
+        }
+        else
+        {
+            tokenLeaseHeld = false;
+        }
+
         task = {};
+        session.reset();
     }
 
+    std::shared_ptr<SharedSession> session;
     RegisteredSessionTask task;
+    bool tokenLeaseHeld = false;
 };
 
 //==============================================================================
@@ -896,7 +1101,7 @@ public:
 
     bool start (WebInputStream& inputStream, WebInputStream::Listener* listener)
     {
-        TaskToken newToken { request.get(), this };
+        TaskToken newToken { getProcessSharedSession(), request.get(), this };
 
         if (! newToken)
             return false;
