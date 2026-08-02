@@ -118,6 +118,63 @@ bool JUCE_CALLTYPE Process::openEmailWithAttachments ([[maybe_unused]] const Str
   #endif
 }
 
+namespace detail
+{
+enum class WebInputStreamDiagnosticEventType : std::uint8_t
+{
+    taskRegistered,
+    responseBodyWait
+};
+
+struct WebInputStreamDiagnosticEvent
+{
+    WebInputStreamDiagnosticEventType type {};
+    std::uint64_t generation = 0;
+    std::uint64_t taskIdentifier = 0;
+    std::int64_t requestUrlHash = 0;
+    std::int64_t bytesConsumedByRead = 0;
+};
+
+/** Internal, allocation-free lifecycle observation. The sink may run while a
+    URLConnectionState mutex is held, so it must be non-blocking. The setter
+    only exchanges the sink; callers must quiesce observed requests before
+    destroying the sink's storage. */
+using WebInputStreamDiagnosticSink = void (*) (WebInputStreamDiagnosticEvent) noexcept;
+
+namespace
+{
+std::atomic<WebInputStreamDiagnosticSink>& getWebInputStreamDiagnosticSink() noexcept
+{
+    static std::atomic<WebInputStreamDiagnosticSink> sink { nullptr };
+    return sink;
+}
+}
+
+WebInputStreamDiagnosticSink setWebInputStreamDiagnosticSink (WebInputStreamDiagnosticSink sink) noexcept
+{
+    return getWebInputStreamDiagnosticSink().exchange (sink, std::memory_order_acq_rel);
+}
+
+static bool hasWebInputStreamDiagnosticSink() noexcept
+{
+    return getWebInputStreamDiagnosticSink().load (std::memory_order_acquire) != nullptr;
+}
+
+static std::int64_t getWebInputStreamDiagnosticRequestUrlHash (NSURLRequest* request)
+{
+    if (! hasWebInputStreamDiagnosticSink() || request == nullptr || [request URL] == nil)
+        return 0;
+
+    return nsStringToJuce ([[request URL] absoluteString]).hashCode64();
+}
+
+static void publishWebInputStreamDiagnosticEvent (WebInputStreamDiagnosticEvent event) noexcept
+{
+    if (const auto sink = getWebInputStreamDiagnosticSink().load (std::memory_order_acquire))
+        sink (event);
+}
+} // namespace detail
+
 //==============================================================================
 struct SessionListener
 {
@@ -129,8 +186,126 @@ struct SessionListener
     virtual void willPerformHTTPRedirection (NSURLRequest*, void (^) (NSURLRequest *)) = 0;
 };
 
+struct RegisteredSessionTask
+{
+    NSUniquePtr<NSURLSessionTask> task;
+    std::uint64_t generation = 0;
+    NSUInteger identifier = 0;
+    std::int64_t requestUrlHash = 0;
+
+    explicit operator bool() const noexcept { return task != nullptr; }
+};
+
 class SharedSession
 {
+    enum class Lifecycle
+    {
+        running,
+        shuttingDown
+    };
+
+    struct ListenerRecord
+    {
+        SessionListener* listener = nullptr;
+        size_t activeCallbacks = 0;
+        bool terminalCallbackStarted = false;
+    };
+
+    struct SessionGeneration
+    {
+        SessionGeneration (std::uint64_t generationToUse,
+                           NSObject<NSURLSessionTaskDelegate>* delegateToUse)
+            : generation (generationToUse),
+              session ([[NSURLSession sessionWithConfiguration: [NSURLSessionConfiguration defaultSessionConfiguration]
+                                                       delegate: delegateToUse
+                                                  delegateQueue: nil] retain])
+        {
+        }
+
+        std::uint64_t generation = 0;
+        NSUniquePtr<NSURLSession> session;
+        std::map<NSUInteger, ListenerRecord> listeners;
+        bool invalidationRequested = false;
+        bool invalidationCallbackReceived = false;
+    };
+
+    void releaseListenerCallback (std::uint64_t generation,
+                                  NSUInteger identifier) noexcept;
+
+    class ListenerCallback
+    {
+    public:
+        ListenerCallback() = default;
+
+        ListenerCallback (SharedSession* ownerToUse,
+                          std::uint64_t generationToUse,
+                          NSUInteger identifierToUse,
+                          SessionListener* listenerToUse) noexcept
+            : owner (ownerToUse),
+              generation (generationToUse),
+              identifier (identifierToUse),
+              listener (listenerToUse)
+        {
+        }
+
+        ListenerCallback (ListenerCallback&& other) noexcept
+            : owner (std::exchange (other.owner, nullptr)),
+              generation (other.generation),
+              identifier (other.identifier),
+              listener (other.listener)
+        {
+        }
+
+        ListenerCallback& operator= (ListenerCallback&& other) noexcept
+        {
+            if (this != &other)
+            {
+                reset();
+                owner = std::exchange (other.owner, nullptr);
+                generation = other.generation;
+                identifier = other.identifier;
+                listener = other.listener;
+            }
+
+            return *this;
+        }
+
+        ~ListenerCallback();
+
+        explicit operator bool() const noexcept { return listener != nullptr; }
+        SessionListener* operator->() const noexcept { return listener; }
+
+    private:
+        void reset() noexcept;
+
+        SharedSession* owner = nullptr;
+        std::uint64_t generation = 0;
+        NSUInteger identifier = 0;
+        SessionListener* listener = nullptr;
+    };
+
+    class ScopedCallback
+    {
+    public:
+        explicit ScopedCallback (SharedSession& ownerToUse)
+            : owner (ownerToUse)
+        {
+            const std::scoped_lock lock { owner.mutex };
+            ++owner.activeCallbacks;
+        }
+
+        ~ScopedCallback()
+        {
+            const std::scoped_lock lock { owner.mutex };
+            jassert (owner.activeCallbacks > 0);
+            --owner.activeCallbacks;
+            owner.condvar.notify_all();
+        }
+
+    private:
+        SharedSession& owner;
+    };
+
 public:
     SharedSession()
     {
@@ -139,119 +314,330 @@ public:
 
     ~SharedSession()
     {
+        std::vector<NSUniquePtr<NSURLSession>> sessionsToInvalidate;
+
+        {
+            const std::scoped_lock lock { mutex };
+            lifecycle = Lifecycle::shuttingDown;
+            acceptingGeneration = nullptr;
+
+            for (auto& generation : generations)
+                if (auto sessionToInvalidate = beginInvalidationLocked (*generation))
+                    sessionsToInvalidate.push_back (std::move (sessionToInvalidate));
+        }
+
+        for (auto& sessionToInvalidate : sessionsToInvalidate)
+            [sessionToInvalidate.get() finishTasksAndInvalidate];
+
+        sessionsToInvalidate.clear();
+
         std::unique_lock lock { mutex };
-
-        if (session != nullptr)
-            [session.get() finishTasksAndInvalidate];
-
-        condvar.wait (lock, [&] { return session == nullptr; });
+        condvar.wait (lock, [&] { return generations.empty() && activeCallbacks == 0; });
+        DelegateClass::setState (delegate.get(), nullptr);
     }
 
-    NSUniquePtr<NSURLSessionTask> addTask (NSURLRequest* request, SessionListener* listener)
+    RegisteredSessionTask addTask (NSURLRequest* request, SessionListener* listener)
     {
-        std::unique_lock lock { mutex };
+        NSUniquePtr<NSURLSession> sessionToInvalidate;
+        RegisteredSessionTask result;
+        const auto requestUrlHash = detail::getWebInputStreamDiagnosticRequestUrlHash (request);
 
-        if (session == nullptr)
-            return nullptr;
+        {
+            const std::scoped_lock lock { mutex };
 
-        NSUniquePtr<NSURLSessionTask> task { [[session.get() dataTaskWithRequest: request] retain] };
-        listenerForTask[[task.get() taskIdentifier]] = listener;
-        return task;
+            if (lifecycle != Lifecycle::running || request == nullptr || listener == nullptr)
+                return {};
+
+            auto* generation = acceptingGeneration;
+
+            if (generation == nullptr)
+                generation = createGenerationLocked();
+
+            if (generation == nullptr)
+                return {};
+
+            NSUniquePtr<NSURLSessionTask> task
+            {
+                [[generation->session.get() dataTaskWithRequest: request] retain]
+            };
+
+            if (task != nullptr)
+            {
+                const auto identifier = [task.get() taskIdentifier];
+                const auto inserted = generation->listeners.emplace (
+                    identifier, ListenerRecord { listener, 0, false });
+
+                if (inserted.second)
+                {
+                    result.task = std::move (task);
+                    result.generation = generation->generation;
+                    result.identifier = identifier;
+                    result.requestUrlHash = requestUrlHash;
+                }
+                else
+                {
+                    jassertfalse;
+                }
+            }
+
+            if (! result && generation->listeners.empty())
+                sessionToInvalidate = beginInvalidationLocked (*generation);
+        }
+
+        if (sessionToInvalidate != nullptr)
+            [sessionToInvalidate.get() finishTasksAndInvalidate];
+
+        if (result)
+        {
+            detail::publishWebInputStreamDiagnosticEvent (
+                { detail::WebInputStreamDiagnosticEventType::taskRegistered,
+                  result.generation,
+                  static_cast<std::uint64_t> (result.identifier),
+                  result.requestUrlHash,
+                  0 });
+        }
+
+        return result;
     }
 
-    void removeTask (NSURLSessionTask* task)
+    void removeTask (const RegisteredSessionTask& task)
     {
+        if (! task)
+            return;
+
         std::unique_lock lock { mutex };
-        condvar.wait (lock, [&] { return listenerForTask.find ([task taskIdentifier]) == listenerForTask.end(); });
+        condvar.wait (lock,
+                      [&]
+                      {
+                          const auto* generation = findGenerationLocked (task.generation);
+
+                          return generation == nullptr
+                              || generation->listeners.find (task.identifier) == generation->listeners.end();
+                      });
     }
 
 private:
-    void didBecomeInvalid ([[maybe_unused]] NSError* error)
+    void didBecomeInvalid (NSURLSession* session, [[maybe_unused]] NSError* error)
     {
+        ScopedCallback callback { *this };
+
        #if JUCE_DEBUG
         if (error != nullptr)
             DBG (nsStringToJuce ([error description]));
        #endif
 
-        const auto toNotify = std::invoke ([&]
-        {
-            const std::scoped_lock lock { mutex };
-            session.reset();
-            // Take a copy of listenerForTask so that we don't need to hold the lock while
-            // iterating through the remaining listeners.
-            return std::exchange (listenerForTask, {});
-        });
-
-        for (const auto& pair : toNotify)
-            pair.second->didComplete (error);
-
-        // Important: we keep the lock held while calling condvar.notify_all().
-        // If we don't, then it's possible that when the destructor runs, it will wake
-        // before we notify the condvar on this thread, allowing the destructor to continue
-        // and destroying the condition variable. When didBecomeInvalid resumes, the condition
-        // variable will have been destroyed.
-        // Use notify_all() rather than notify_one() so that all threads waiting
-        // in removeTask() can make progress in the case that the session is
-        // invalidated unexpectedly.
-        const std::scoped_lock lock { mutex };
-        condvar.notify_all();
-    }
-
-    void didComplete (NSURLSessionTask* task, [[maybe_unused]] NSError* error)
-    {
-       #if JUCE_DEBUG
-        if (error != nullptr)
-            DBG (nsStringToJuce ([error description]));
-       #endif
-
-        auto* listener = getListener (task);
-
-        if (listener == nullptr)
-            return;
-
-        listener->didComplete (error);
+        std::vector<ListenerCallback> toNotify;
+        std::unique_ptr<SessionGeneration> generationToRelease;
+        std::uint64_t generationId = 0;
 
         {
             const std::scoped_lock lock { mutex };
-            listenerForTask.erase ([task taskIdentifier]);
+            auto* generation = findGenerationLocked (session);
+
+            if (generation == nullptr || generation->invalidationCallbackReceived)
+                return;
+
+            generationId = generation->generation;
+            generation->invalidationRequested = true;
+            generation->invalidationCallbackReceived = true;
+
+            if (acceptingGeneration == generation)
+                acceptingGeneration = nullptr;
+
+            for (auto& [identifier, record] : generation->listeners)
+            {
+                if (record.terminalCallbackStarted)
+                    continue;
+
+                record.terminalCallbackStarted = true;
+                ++record.activeCallbacks;
+                toNotify.emplace_back (this, generationId, identifier, record.listener);
+            }
+
+            generationToRelease = takeDrainedGenerationLocked (generationId);
+            condvar.notify_all();
         }
 
-        condvar.notify_all();
+        for (auto& listener : toNotify)
+            listener->didComplete (error);
     }
 
-    void didReceiveResponse (NSURLSessionTask* task,
+    void didComplete (NSURLSession* session,
+                      NSURLSessionTask* task,
+                      [[maybe_unused]] NSError* error)
+    {
+        ScopedCallback callback { *this };
+
+       #if JUCE_DEBUG
+        if (error != nullptr)
+            DBG (nsStringToJuce ([error description]));
+       #endif
+
+        auto listener = beginTerminalCallback (session, task);
+
+        if (listener)
+            listener->didComplete (error);
+    }
+
+    void didReceiveResponse (NSURLSession* session,
+                             NSURLSessionTask* task,
                              NSURLResponse* response,
                              void (^completionHandler) (NSURLSessionResponseDisposition))
     {
-        if (auto* listener = getListener (task))
+        ScopedCallback callback { *this };
+
+        if (auto listener = getListener (session, task))
             listener->didReceiveResponse (response, completionHandler);
+        else
+            completionHandler (NSURLSessionResponseCancel);
     }
 
-    void didReceiveData (NSURLSessionTask* task, NSData* newData)
+    void didReceiveData (NSURLSession* session, NSURLSessionTask* task, NSData* newData)
     {
-        if (auto* listener = getListener (task))
+        ScopedCallback callback { *this };
+
+        if (auto listener = getListener (session, task))
             listener->didReceiveData (newData);
     }
 
-    void didSendBodyData (NSURLSessionTask* task, int64_t totalBytesWritten)
+    void didSendBodyData (NSURLSession* session,
+                          NSURLSessionTask* task,
+                          int64_t totalBytesWritten)
     {
-        if (auto* listener = getListener (task))
+        ScopedCallback callback { *this };
+
+        if (auto listener = getListener (session, task))
             listener->didSendBodyData (totalBytesWritten);
     }
 
-    void willPerformHTTPRedirection (NSURLSessionTask* task,
+    void willPerformHTTPRedirection (NSURLSession* session,
+                                     NSURLSessionTask* task,
                                      NSURLRequest* urlRequest,
                                      void (^completionHandler) (NSURLRequest *))
     {
-        if (auto* listener = getListener (task))
+        ScopedCallback callback { *this };
+
+        if (auto listener = getListener (session, task))
             listener->willPerformHTTPRedirection (urlRequest, completionHandler);
+        else
+            completionHandler (nil);
     }
 
-    SessionListener* getListener (NSURLSessionTask* t)
+    ListenerCallback getListener (NSURLSession* session, NSURLSessionTask* task)
     {
         const std::scoped_lock lock { mutex };
-        const auto iter = listenerForTask.find ([t taskIdentifier]);
-        return iter != listenerForTask.end() ? iter->second : nullptr;
+        auto* generation = findGenerationLocked (session);
+
+        if (generation == nullptr)
+            return {};
+
+        const auto identifier = [task taskIdentifier];
+        const auto iter = generation->listeners.find (identifier);
+
+        if (iter == generation->listeners.end() || iter->second.terminalCallbackStarted)
+            return {};
+
+        ++iter->second.activeCallbacks;
+        return { this, generation->generation, identifier, iter->second.listener };
+    }
+
+    ListenerCallback beginTerminalCallback (NSURLSession* session, NSURLSessionTask* task)
+    {
+        const std::scoped_lock lock { mutex };
+        auto* generation = findGenerationLocked (session);
+
+        if (generation == nullptr)
+            return {};
+
+        const auto identifier = [task taskIdentifier];
+        const auto iter = generation->listeners.find (identifier);
+
+        if (iter == generation->listeners.end() || iter->second.terminalCallbackStarted)
+            return {};
+
+        iter->second.terminalCallbackStarted = true;
+        ++iter->second.activeCallbacks;
+        return { this, generation->generation, identifier, iter->second.listener };
+    }
+
+    SessionGeneration* createGenerationLocked()
+    {
+        if (lifecycle != Lifecycle::running || nextGeneration == 0)
+            return nullptr;
+
+        const auto generationId = nextGeneration;
+        nextGeneration = generationId == std::numeric_limits<std::uint64_t>::max()
+                       ? 0
+                       : generationId + 1;
+
+        auto generation = std::make_unique<SessionGeneration> (generationId, delegate.get());
+
+        if (generation->session == nullptr)
+            return nullptr;
+
+        auto* result = generation.get();
+        generations.push_back (std::move (generation));
+        acceptingGeneration = result;
+        return result;
+    }
+
+    NSUniquePtr<NSURLSession> beginInvalidationLocked (SessionGeneration& generation)
+    {
+        if (generation.invalidationRequested)
+            return {};
+
+        generation.invalidationRequested = true;
+
+        if (acceptingGeneration == &generation)
+            acceptingGeneration = nullptr;
+
+        return NSUniquePtr<NSURLSession> { [generation.session.get() retain] };
+    }
+
+    SessionGeneration* findGenerationLocked (NSURLSession* session)
+    {
+        const auto iter = std::find_if (generations.begin(),
+                                        generations.end(),
+                                        [session] (const auto& generation)
+                                        {
+                                            return generation->session.get() == session;
+                                        });
+        return iter != generations.end() ? iter->get() : nullptr;
+    }
+
+    SessionGeneration* findGenerationLocked (std::uint64_t generationId)
+    {
+        const auto iter = std::find_if (generations.begin(),
+                                        generations.end(),
+                                        [generationId] (const auto& generation)
+                                        {
+                                            return generation->generation == generationId;
+                                        });
+        return iter != generations.end() ? iter->get() : nullptr;
+    }
+
+    std::unique_ptr<SessionGeneration> takeDrainedGenerationLocked (std::uint64_t generationId)
+    {
+        const auto iter = std::find_if (generations.begin(),
+                                        generations.end(),
+                                        [generationId] (const auto& generation)
+                                        {
+                                            return generation->generation == generationId;
+                                        });
+
+        if (iter == generations.end()
+            || ! (*iter)->invalidationCallbackReceived
+            || ! (*iter)->listeners.empty())
+        {
+            return {};
+        }
+
+        if (acceptingGeneration == iter->get())
+            acceptingGeneration = nullptr;
+
+        auto result = std::move (*iter);
+        generations.erase (iter);
+        return result;
     }
 
     struct DelegateClass final : public ObjCClass<NSObject<NSURLSessionTaskDelegate>>
@@ -262,56 +648,66 @@ private:
             addIvar<SharedSession*> ("state");
 
             addMethod (@selector (URLSession:didBecomeInvalidWithError:),
-                       [] (id self, SEL, NSURLSession*, NSError* error)
+                       [] (id self, SEL, NSURLSession* session, NSError* error)
                        {
-                           getState (self)->didBecomeInvalid (error);
+                           if (auto* state = getState (self))
+                               state->didBecomeInvalid (session, error);
                        });
 
             addMethod (@selector (URLSession:dataTask:didReceiveResponse:completionHandler:),
                        [] (id self,
                            SEL,
-                           NSURLSession*,
+                           NSURLSession* session,
                            NSURLSessionDataTask* task,
                            NSURLResponse* response,
                            void (^completionHandler) (NSURLSessionResponseDisposition))
                        {
-                           getState (self)->didReceiveResponse (task, response, completionHandler);
+                           if (auto* state = getState (self))
+                               state->didReceiveResponse (session, task, response, completionHandler);
+                           else
+                               completionHandler (NSURLSessionResponseCancel);
                        });
 
             addMethod (@selector (URLSession:dataTask:didReceiveData:),
-                       [] (id self, SEL, NSURLSession*, NSURLSessionDataTask* task, NSData* newData)
+                       [] (id self, SEL, NSURLSession* session, NSURLSessionDataTask* task, NSData* newData)
                        {
-                           getState (self)->didReceiveData (task, newData);
+                           if (auto* state = getState (self))
+                               state->didReceiveData (session, task, newData);
                        });
 
             addMethod (@selector (URLSession:task:didSendBodyData:totalBytesSent:totalBytesExpectedToSend:),
                        [] (id self,
                            SEL,
-                           NSURLSession*,
+                           NSURLSession* session,
                            NSURLSessionTask* task,
                            int64_t,
                            int64_t totalBytesWritten,
                            int64_t)
                        {
-                           getState (self)->didSendBodyData (task, totalBytesWritten);
+                           if (auto* state = getState (self))
+                               state->didSendBodyData (session, task, totalBytesWritten);
                        });
 
             addMethod (@selector (URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:),
                        [] (id self,
                            SEL,
-                           NSURLSession*,
+                           NSURLSession* session,
                            NSURLSessionTask* task,
                            NSHTTPURLResponse*,
                            NSURLRequest* req,
                            void (^completionHandler) (NSURLRequest *))
                        {
-                           getState (self)->willPerformHTTPRedirection (task, req, completionHandler);
+                           if (auto* state = getState (self))
+                               state->willPerformHTTPRedirection (session, task, req, completionHandler);
+                           else
+                               completionHandler (nil);
                        });
 
             addMethod (@selector (URLSession:task:didCompleteWithError:),
-                       [] (id self, SEL, NSURLConnection*, NSURLSessionTask* task, NSError* error)
+                       [] (id self, SEL, NSURLSession* session, NSURLSessionTask* task, NSError* error)
                        {
-                           getState (self)->didComplete (task, error);
+                           if (auto* state = getState (self))
+                               state->didComplete (session, task, error);
                        });
 
             registerClass();
@@ -331,15 +727,64 @@ private:
     std::condition_variable condvar;
 
     NSUniquePtr<NSObject<NSURLSessionTaskDelegate>> delegate { [DelegateClass::get().createInstance() init] };
-    NSUniquePtr<NSURLSession> session
-    {
-        [[NSURLSession sessionWithConfiguration: [NSURLSessionConfiguration defaultSessionConfiguration]
-                                       delegate: delegate.get()
-                                  delegateQueue: nil] retain]
-    };
-
-    std::map<NSUInteger, SessionListener*> listenerForTask;
+    std::vector<std::unique_ptr<SessionGeneration>> generations;
+    SessionGeneration* acceptingGeneration = nullptr;
+    std::uint64_t nextGeneration = 1;
+    Lifecycle lifecycle = Lifecycle::running;
+    size_t activeCallbacks = 0;
 };
+
+void SharedSession::ListenerCallback::reset() noexcept
+{
+    if (auto* callbackOwner = std::exchange (owner, nullptr))
+        callbackOwner->releaseListenerCallback (generation, identifier);
+}
+
+SharedSession::ListenerCallback::~ListenerCallback()
+{
+    reset();
+}
+
+void SharedSession::releaseListenerCallback (std::uint64_t generationId,
+                                             NSUInteger identifier) noexcept
+{
+    std::unique_ptr<SessionGeneration> generationToRelease;
+
+    {
+        const std::scoped_lock lock { mutex };
+        auto* generation = findGenerationLocked (generationId);
+
+        if (generation != nullptr)
+        {
+            const auto iter = generation->listeners.find (identifier);
+
+            if (iter != generation->listeners.end())
+            {
+                jassert (iter->second.activeCallbacks > 0);
+                --iter->second.activeCallbacks;
+
+                if (iter->second.activeCallbacks == 0
+                    && iter->second.terminalCallbackStarted)
+                {
+                    generation->listeners.erase (iter);
+                }
+            }
+
+            generationToRelease = takeDrainedGenerationLocked (generationId);
+            condvar.notify_all();
+        }
+    }
+}
+
+/** Keep one SharedSession alive for the process lifetime. A scoped
+    SharedResourcePointer alone destroys and recreates NSURLSession whenever
+    the last WebInputStream in a sequential workload goes away, which churns
+    CFNetwork resources and defeats healthy-generation reuse. */
+static SharedResourcePointer<SharedSession>& getProcessSharedSession()
+{
+    static SharedResourcePointer<SharedSession> session;
+    return session;
+}
 
 class TaskToken
 {
@@ -349,33 +794,65 @@ public:
     explicit TaskToken (NSURLRequest* request, SessionListener* l)
         : task ([&]
                 {
-                    SharedResourcePointer<SharedSession> session;
+                    auto& session = getProcessSharedSession();
                     return session->addTask (request, l);
                 }())
     {
-        if (auto* t = task.get())
+        if (auto* t = task.task.get())
             [t resume];
     }
 
     TaskToken (TaskToken&&) noexcept = default;
-    TaskToken& operator= (TaskToken&&) noexcept = default;
 
     ~TaskToken()
     {
-        SharedResourcePointer<SharedSession> session;
-
-        if (auto* toRemove = task.get())
-            session->removeTask (toRemove);
+        reset();
     }
+
+    TaskToken& operator= (TaskToken&& other) noexcept
+    {
+        if (this != &other)
+        {
+            reset();
+            task = std::move (other.task);
+        }
+
+        return *this;
+    }
+
+    explicit operator bool() const noexcept { return static_cast<bool> (task); }
 
     void cancel()
     {
-        if (auto* toCancel = task.get())
+        if (auto* toCancel = task.task.get())
             [toCancel cancel];
     }
 
+    void publishResponseBodyWait (std::int64_t bytesConsumedByRead) const noexcept
+    {
+        if (! task)
+            return;
+
+        detail::publishWebInputStreamDiagnosticEvent (
+            { detail::WebInputStreamDiagnosticEventType::responseBodyWait,
+              task.generation,
+              static_cast<std::uint64_t> (task.identifier),
+              task.requestUrlHash,
+              bytesConsumedByRead });
+    }
+
 private:
-    NSUniquePtr<NSURLSessionTask> task;
+    void reset()
+    {
+        if (! task)
+            return;
+
+        auto& session = getProcessSharedSession();
+        session->removeTask (task);
+        task = {};
+    }
+
+    RegisteredSessionTask task;
 };
 
 //==============================================================================
@@ -421,6 +898,9 @@ public:
     {
         TaskToken newToken { request.get(), this };
 
+        if (! newToken)
+            return false;
+
         std::unique_lock lock { mutex };
         token = std::move (newToken);
 
@@ -449,6 +929,16 @@ public:
             std::unique_lock lock { mutex };
 
             const auto getNumAvailable = [&] { return jmin (numBytes, (int) [data.get() length]); };
+
+            if (getNumAvailable() == 0 && state != State::requestFinished)
+            {
+                // This event is published while holding the same mutex that
+                // cancel() must acquire, immediately before condvar.wait()
+                // atomically releases it. A teardown that observes the event
+                // therefore cannot cancel ahead of this production wait.
+                token.publishResponseBodyWait (numDone);
+            }
+
             condvar.wait (lock, [&] { return getNumAvailable() > 0 || state == State::requestFinished; });
 
             const auto available = getNumAvailable();
@@ -546,7 +1036,6 @@ private:
     int numRedirects = 0;
     State state = State::beforeStart;
 
-    SharedResourcePointer<SharedSession> session;
     TaskToken token;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (URLConnectionState)
