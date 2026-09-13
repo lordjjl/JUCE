@@ -452,19 +452,12 @@ struct AppleFFT final : public FFT::Instance
 
     AppleFFT (int orderToUse)
         : order (static_cast<vDSP_Length> (orderToUse)),
-          fftSetup (vDSP_create_fftsetup (order, 2)),
+          fftSetup (getSharedFFTSetup (order)),
           forwardNormalisation (0.5f),
           inverseNormalisation (1.0f / static_cast<float> (1 << order))
     {}
 
-    ~AppleFFT() override
-    {
-        if (fftSetup != nullptr)
-        {
-            vDSP_destroy_fftsetup (fftSetup);
-            fftSetup = nullptr;
-        }
-    }
+    ~AppleFFT() override = default;
 
     void perform (const Complex<float>* input, Complex<float>* output, bool inverse) const noexcept override
     {
@@ -512,6 +505,31 @@ struct AppleFFT final : public FFT::Instance
 
 private:
     //==============================================================================
+    static FFTSetup getSharedFFTSetup (vDSP_Length orderToUse)
+    {
+        // Batchy creates and tears down many short-lived convolution engines
+        // during offline renders. Reusing one vDSP setup per FFT order avoids
+        // repeated create/destroy churn and prevents teardown-time allocator
+        // aborts in vDSP_destroy_fftsetup under render-pool shutdown.
+        struct SetupCache
+        {
+            CriticalSection lock;
+            std::vector<FFTSetup> setups;
+        };
+
+        static SetupCache cache;
+
+        const ScopedLock sl (cache.lock);
+        if (cache.setups.size() <= orderToUse)
+            cache.setups.resize (static_cast<size_t> (orderToUse) + 1, nullptr);
+
+        auto& setup = cache.setups[static_cast<size_t> (orderToUse)];
+        if (setup == nullptr)
+            setup = vDSP_create_fftsetup (orderToUse, 2);
+
+        return setup;
+    }
+
     void mirrorResult (Complex<float>* out, bool ignoreNegativeFreqs) const noexcept
     {
         auto size = (1 << order);
