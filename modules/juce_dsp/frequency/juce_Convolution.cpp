@@ -1029,6 +1029,22 @@ public:
                                                                  requiredHeadSize))
     {}
 
+    ~Impl() noexcept
+    {
+        // The owned queue can still contain deferred destruction commands for
+        // previous engines. Stop and drain it before any FFT-backed engines
+        // below are destroyed so their cleanup cannot race the loader thread.
+        if (messageQueue != nullptr && messageQueue.willDeleteObject())
+        {
+            messageQueue->pimpl->stopThread (-1);
+            messageQueue->pimpl->popAll();
+        }
+
+        engineQueue.reset();
+        previousEngine = nullptr;
+        currentEngine = nullptr;
+    }
+
     void reset()
     {
         mixer.reset();
