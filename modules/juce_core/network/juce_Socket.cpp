@@ -645,9 +645,22 @@ StreamingSocket* StreamingSocket::waitForNextConnection() const
         juce_socklen_t len = sizeof (address);
         auto newSocket = (int) accept ((SocketHandle) handle.load(), (struct sockaddr*) &address, &len);
 
-        if (newSocket >= 0 && connected)
-            return new StreamingSocket (inet_ntoa (((struct sockaddr_in*) &address)->sin_addr),
-                                        portNumber, newSocket, options);
+        if (newSocket >= 0)
+        {
+            if (connected)
+                return new StreamingSocket (inet_ntoa (((struct sockaddr_in*) &address)->sin_addr),
+                                            portNumber, newSocket, options);
+
+            // connected was flipped false by a concurrent close() between accept() succeeding
+            // and this check running. Nothing will ever take ownership of the accepted
+            // descriptor, so close it here or it leaks (observed as CLOSE_WAIT sockets when a
+            // listener's close() races accept() under Batchy's ImageDisplay hardening stress).
+           #if JUCE_WINDOWS
+            closesocket ((SocketHandle) newSocket);
+           #else
+            ::close (newSocket);
+           #endif
+        }
     }
 
     return nullptr;
