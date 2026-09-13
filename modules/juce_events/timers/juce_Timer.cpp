@@ -348,6 +348,25 @@ private:
         callbackArrived.signal();
     }
 
+public:
+    // BATCHY PATCH (2026-04-18): bounded-join shutdown helper, invoked by
+    // juce::Timer::shutdownTimerThread() from shutdownJuce_GUI. Upstream
+    // JUCE signals TimerThread via ShutdownDetector::Listener but never
+    // joins it — so `deleteAll()` can mutate `timers` concurrently with
+    // `run()`'s iteration, causing SIGBUS on arm64 macOS. Joining with a
+    // 2s upper bound keeps the Batchy test harness exit-clean without
+    // risking an infinite hang if a timer callback deadlocks.
+    //
+    // Placed in its own `public:` section because the surrounding thread-
+    // control helpers (stopThreadAsync et al.) are deliberately private;
+    // only this one method needs cross-class callable visibility.
+    void stopAndJoinForShutdown()
+    {
+        stopThreadAsync();
+        stopThread (2000);
+    }
+
+private:
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TimerThread)
 };
@@ -405,6 +424,16 @@ void JUCE_CALLTYPE Timer::callPendingTimersSynchronously()
 {
     if (auto instance = SharedResourcePointer<TimerThread>::getSharedObjectWithoutCreating())
         (*instance)->callTimersSynchronously();
+}
+
+// BATCHY PATCH (2026-04-18): see juce_Timer.h for rationale. Joins the
+// shared TimerThread with a 2s bounded timeout. Called from
+// shutdownJuce_GUI between DeletedAtShutdown::deleteAll() and
+// MessageManager::deleteInstance() to close the teardown race.
+void JUCE_CALLTYPE Timer::shutdownTimerThread()
+{
+    if (auto instance = SharedResourcePointer<TimerThread>::getSharedObjectWithoutCreating())
+        (*instance)->stopAndJoinForShutdown();
 }
 
 struct LambdaInvoker final : private Timer,

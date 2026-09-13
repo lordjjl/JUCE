@@ -137,6 +137,21 @@ public:
     */
     static void JUCE_CALLTYPE callPendingTimersSynchronously();
 
+    /** BATCHY PATCH (2026-04-18): forces the shared TimerThread to stop
+        and join with a bounded 2-second timeout. Called from
+        shutdownJuce_GUI between DeletedAtShutdown::deleteAll() and
+        MessageManager::deleteInstance() to close the teardown race
+        where LambdaInvoker destructors (running under deleteAll) mutate
+        the timers vector concurrently with TimerThread::run()'s
+        iteration, producing SIGBUS on arm64 macOS.
+
+        Upstream JUCE 8.0.10 only signals the TimerThread via
+        ShutdownDetector::Listener::applicationShuttingDown(); it never
+        joins. This static is the minimal intervention to serialize
+        teardown. Bounded timeout prevents a deadlocked timer callback
+        from hanging process shutdown. */
+    static void JUCE_CALLTYPE shutdownTimerThread();
+
 private:
     class TimerThread;
     size_t positionInQueue = (size_t) -1;

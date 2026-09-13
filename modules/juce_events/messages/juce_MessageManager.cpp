@@ -467,6 +467,10 @@ JUCE_API void JUCE_CALLTYPE shutdownJuce_GUI()
     JUCE_AUTORELEASEPOOL
     {
         DeletedAtShutdown::deleteAll();
+        // BATCHY PATCH (2026-04-18): see Timer::shutdownTimerThread()
+        // for rationale. Joins the shared TimerThread before MessageManager
+        // is deleted to close the SIGBUS-on-teardown race.
+        Timer::shutdownTimerThread();
         MessageManager::deleteInstance();
     }
 }
