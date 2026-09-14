@@ -452,8 +452,19 @@ struct LambdaInvoker final : private Timer,
 
     void timerCallback() final
     {
-        NullCheckedInvocation::invoke (function);
+        // BATCHY PATCH (2026-09-13): release the invoker BEFORE running the
+        // function. Upstream invoked the function first and then `delete this`.
+        // callTimers() resets this timer's countdown before invoking it, so a
+        // function that pumps the message loop (a nested runDispatchLoopUntil
+        // while, for example, a shutdown waits for a render to cancel) for
+        // longer than its own delay lets the timer thread post another
+        // CallTimersMessage and fire the SAME invoker inside its own callback;
+        // both activations then ran `delete this`. Deleting first removes the
+        // timer from the queue before anything the function does can re-enter
+        // it, and nothing can hold a reference to a LambdaInvoker.
+        auto pendingFunction = std::move (function);
         delete this;
+        NullCheckedInvocation::invoke (pendingFunction);
     }
 
     std::function<void()> function;
