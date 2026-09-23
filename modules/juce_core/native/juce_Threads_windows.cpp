@@ -447,9 +447,18 @@ public:
             startupInfo.hStdError  = (streamFlags & wantStdErr) != 0 ? writePipe : nullptr;
             startupInfo.dwFlags = STARTF_USESTDHANDLES;
 
+            // Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
+            // option B2): CREATE_NEW_PROCESS_GROUP puts the child in its own
+            // console process group, so a console CTRL_C_EVENT aimed at the
+            // parent's group does not reach it.
+            auto creationFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
+
+            if ((streamFlags & separateProcessGroup) != 0)
+                creationFlags |= CREATE_NEW_PROCESS_GROUP;
+
             JUCE_BEGIN_IGNORE_WARNINGS_MSVC (6335)
             ok = CreateProcess (nullptr, const_cast<LPWSTR> (command.toWideCharPointer()),
-                                nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                                nullptr, nullptr, TRUE, creationFlags,
                                 nullptr, nullptr, &startupInfo, &processInfo) != FALSE;
             JUCE_END_IGNORE_WARNINGS_MSVC
         }

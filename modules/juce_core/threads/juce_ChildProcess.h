@@ -62,7 +62,14 @@ public:
     enum StreamFlags
     {
         wantStdOut = 1,
-        wantStdErr = 2
+        wantStdErr = 2,
+
+        /** Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
+            option B2): put the child in its own process group / Windows process
+            group, so a terminal Ctrl+C or console CTRL_C_EVENT aimed at the
+            parent's group does not reach it.
+        */
+        separateProcessGroup = 4
     };
 
     /** Attempts to launch a child process command.

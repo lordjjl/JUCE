@@ -1130,6 +1130,13 @@ public:
                 // we're the child process..
                 close (pipeHandles[0]);   // close the read handle
 
+                // Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
+                // option B2): move into our own process group so a terminal
+                // Ctrl+C (SIGINT to the foreground process group) never reaps
+                // this child out from under the parent.
+                if ((streamFlags & separateProcessGroup) != 0)
+                    setpgid (0, 0);
+
                 if ((streamFlags & wantStdOut) != 0)
                     dup2 (pipeHandles[1], STDOUT_FILENO); // turns the pipe into stdout
                 else
