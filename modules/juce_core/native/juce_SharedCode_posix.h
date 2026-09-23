@@ -1130,10 +1130,11 @@ public:
                 // we're the child process..
                 close (pipeHandles[0]);   // close the read handle
 
-                // Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
-                // option B2): move into our own process group so a terminal
-                // Ctrl+C (SIGINT to the foreground process group) never reaps
-                // this child out from under the parent.
+                // BATCHY PATCH (2026-09-23): move into our own process group so a
+                // terminal Ctrl+C (SIGINT to the foreground process group) never
+                // reaps this child out from under the parent. Child-only is
+                // deliberate: nothing here signals or waits on the child's group,
+                // and the parent's own SIGINT handler covers the pre-exec window.
                 if ((streamFlags & separateProcessGroup) != 0)
                     setpgid (0, 0);
 

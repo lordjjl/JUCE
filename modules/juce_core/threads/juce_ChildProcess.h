@@ -64,10 +64,11 @@ public:
         wantStdOut = 1,
         wantStdErr = 2,
 
-        /** Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
-            option B2): put the child in its own process group / Windows process
-            group, so a terminal Ctrl+C or console CTRL_C_EVENT aimed at the
-            parent's group does not reach it.
+        /** BATCHY PATCH (2026-09-23): launch the child in its own process group,
+            so that an interrupt aimed at the parent's group does not reach it.
+            POSIX: setpgid(0, 0) in the child. Windows: CREATE_NEW_PROCESS_GROUP,
+            which disables Ctrl+C handling for the new group (Ctrl+Break still
+            applies). The child must then be terminated explicitly.
         */
         separateProcessGroup = 4
     };

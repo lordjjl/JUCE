@@ -447,10 +447,12 @@ public:
             startupInfo.hStdError  = (streamFlags & wantStdErr) != 0 ? writePipe : nullptr;
             startupInfo.dwFlags = STARTF_USESTDHANDLES;
 
-            // Batchy (docs/superpowers/specs/2026-09-16-plugin-scan-worker-cancellation-hang-spec.md,
-            // option B2): CREATE_NEW_PROCESS_GROUP puts the child in its own
-            // console process group, so a console CTRL_C_EVENT aimed at the
-            // parent's group does not reach it.
+            // BATCHY PATCH (2026-09-23): Ctrl+C protection for a child that must
+            // outlive a console interrupt aimed at its parent. NB the mechanism is
+            // NOT selective addressing -- CTRL_C_EVENT cannot be aimed at one group;
+            // CREATE_NEW_PROCESS_GROUP DISABLES Ctrl+C handling for the new group,
+            // which is what protects the child. Ctrl+Break still reaches it, and
+            // TerminateProcess/IPC shutdown are unaffected.
             auto creationFlags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
 
             if ((streamFlags & separateProcessGroup) != 0)
