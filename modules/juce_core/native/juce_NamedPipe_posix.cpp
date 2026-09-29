@@ -166,6 +166,10 @@ public:
             }
 
             const ScopedWriteLock l (mutex);
+
+            if (descriptor != invalidPipe)
+                return descriptor;
+
             return descriptor = fn();
         }
 
