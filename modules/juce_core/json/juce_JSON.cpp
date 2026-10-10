@@ -41,6 +41,30 @@ struct JSONParser
 
     String::CharPointerType startLocation, currentLocation;
 
+    // Untrusted input must not be able to overflow the stack, so nesting of arrays and
+    // objects is bounded. A parse stack frame is a few hundred bytes, and legitimate
+    // documents nest far below this limit.
+    static constexpr int maxNestingDepth = 256;
+    int nestingDepth = 0;
+
+    struct ScopedDepthIncrement
+    {
+        ScopedDepthIncrement (JSONParser& p, String::CharPointerType location) : parser (p)
+        {
+            if (++parser.nestingDepth > maxNestingDepth)
+            {
+                --parser.nestingDepth;
+                parser.throwError ("Nesting too deep", location);
+            }
+        }
+
+        ~ScopedDepthIncrement()     { --parser.nestingDepth; }
+
+        JSONParser& parser;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedDepthIncrement)
+    };
+
     struct ErrorException
     {
         String message;
@@ -289,6 +313,7 @@ struct JSONParser
 
     var parseObject()
     {
+        const ScopedDepthIncrement depthGuard (*this, currentLocation);
         auto resultObject = new DynamicObject();
         var result (resultObject);
         auto& resultProperties = resultObject->getProperties();
@@ -335,6 +360,7 @@ struct JSONParser
 
     var parseArray()
     {
+        const ScopedDepthIncrement depthGuard (*this, currentLocation);
         auto result = var (Array<var>());
         auto destArray = result.getArray();
         auto startOfArrayDecl = currentLocation;
@@ -828,6 +854,27 @@ public:
             // First and last 4 byte UTF-8 code points (also first and last UTF-16 surrogate pairs)
             expectEscapeSequenceForAsciiEncodingOnly ((juce_wchar) 0x010000, "\\ud800\\udc00");
             expectEscapeSequenceForAsciiEncodingOnly ((juce_wchar) 0x10ffff, "\\udbff\\udfff");
+        }
+
+        beginTest ("Nesting depth limit");
+        {
+            for (const auto* pair : { "[|]", "{\"a\":|}" })
+            {
+                const auto open = String (pair).upToFirstOccurrenceOf ("|", false, false);
+                const auto close = String (pair).fromFirstOccurrenceOf ("|", false, false);
+
+                const auto nested = [&] (int depth)
+                {
+                    return String::repeatedString (open, depth) + "1" + String::repeatedString (close, depth);
+                };
+
+                var result;
+                expect (JSON::parse (nested (256), result).wasOk());
+                expect (JSON::parse (nested (257), result).failed());
+                expect (JSON::parse (nested (100000), result).failed());
+                expect (JSON::parse (nested (257)) == var());
+                expect (JSON::parse (nested (100000)) == var());
+            }
         }
 
         beginTest ("Fuzz tests");
