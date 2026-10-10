@@ -1044,6 +1044,106 @@ public:
                 expectEquals (element->getStringAttribute (number), test.second);
             }
         }
+
+        {
+            beginTest ("Parser nesting depth limit");
+
+            const auto nested = [] (int depth)
+            {
+                return String::repeatedString ("<a>", depth) + String::repeatedString ("</a>", depth);
+            };
+
+            XmlDocument atLimit (nested (XmlDocument::maxElementNestingDepth));
+            expect (atLimit.getDocumentElement() != nullptr);
+            expect (atLimit.getLastParseError().isEmpty());
+
+            XmlDocument overLimit (nested (XmlDocument::maxElementNestingDepth + 1));
+            expect (overLimit.getDocumentElement() == nullptr);
+            expect (overLimit.getLastParseError().isNotEmpty());
+
+            XmlDocument bomb (nested (100000));
+            expect (bomb.getDocumentElement() == nullptr);
+            expect (bomb.getLastParseError().isNotEmpty());
+
+            // The same depth reached through an element-producing entity must also be bounded
+            XmlDocument selfReferencing ("<!DOCTYPE a [ <!ENTITY e \"<a>&e;</a>\"> ]><a>&e;</a>");
+            expect (selfReferencing.getDocumentElement() == nullptr);
+            expect (selfReferencing.getLastParseError().isNotEmpty());
+
+            XmlDocument recursiveText ("<!DOCTYPE a [ <!ENTITY e \"xx&e;\"> ]><a>&e;</a>");
+            expect (recursiveText.getDocumentElement() == nullptr);
+            expect (recursiveText.getLastParseError().isNotEmpty());
+
+            // A chain of N entities, each referring to the previous one, nests N deep
+            const auto entityChain = [] (int length)
+            {
+                String dtd = " <!ENTITY e0 \"x\"> ";
+
+                for (int i = 1; i < length; ++i)
+                    dtd << "<!ENTITY e" << i << " \"&e" << (i - 1) << ";\"> ";
+
+                return "<!DOCTYPE a [" + dtd + "]><a>&e" + String (length - 1) + ";</a>";
+            };
+
+            XmlDocument chainAtLimit (entityChain (XmlDocument::maxEntityNestingDepth));
+            expect (chainAtLimit.getDocumentElement() != nullptr);
+            expect (chainAtLimit.getLastParseError().isEmpty());
+
+            XmlDocument chainOverLimit (entityChain (XmlDocument::maxEntityNestingDepth + 1));
+            expect (chainOverLimit.getDocumentElement() == nullptr);
+            expect (chainOverLimit.getLastParseError().isNotEmpty());
+
+            // Replacements that keep producing '&' must make progress and finish promptly
+            const auto start = Time::getMillisecondCounter();
+            XmlDocument ampersands ("<!DOCTYPE a [ <!ENTITY e \"xx&amp;&amp;&amp;\"> ]><a>&e;</a>");
+            auto parsed = ampersands.getDocumentElement();
+            expect (parsed != nullptr && parsed->getAllSubText() == "xx&&&");
+            expect (Time::getMillisecondCounter() - start < 100);
+
+            // Exponential expansion ("billion laughs") is stopped by the expansion budget
+            String laughs = " <!ENTITY l0 \"lol\"> ";
+
+            for (int i = 1; i < 10; ++i)
+                laughs << "<!ENTITY l" << i << " \"" << String::repeatedString ("&l" + String (i - 1) + ";", 10) << "\"> ";
+
+            XmlDocument billionLaughs ("<!DOCTYPE a [" + laughs + "]><a>&l9;</a>");
+            expect (billionLaughs.getDocumentElement() == nullptr);
+            expect (billionLaughs.getLastParseError().isNotEmpty());
+            expect (Time::getMillisecondCounter() - start < 2000);
+        }
+
+        {
+            beginTest ("Processing instructions and comments in element content");
+
+            // These used to spin forever (a PI followed by text) or are the neighbouring
+            // cases that share the same code path. The PI/comment is skipped, text is kept.
+            const auto check = [this] (const char* xml, const String& expectedText, int expectedChildren)
+            {
+                const auto start = Time::getMillisecondCounter();
+                XmlDocument doc (xml);
+                auto parsed = doc.getDocumentElement();
+                expect (Time::getMillisecondCounter() - start < 100, xml);
+                expect (parsed != nullptr, xml);
+
+                if (parsed != nullptr)
+                {
+                    expect (doc.getLastParseError().isEmpty(), xml);
+                    expectEquals (parsed->getAllSubText(), expectedText);
+                    expectEquals (parsed->getNumChildElements(), expectedChildren);
+                }
+            };
+
+            check ("<a><?p?>t</a>",       "t",   1);
+            check ("<a><?p?> t</a>",      " t",  1);
+            check ("<a>x<?p?>y</a>",      "xy",  1);
+            check ("<a><!--c-->t</a>",    "t",   1);
+            check ("<a>t<!--c-->u</a>",   "tu",  1);
+            check ("<a><?p?><b/></a>",    "",    1);
+
+            XmlDocument unterminated ("<a>t<?p</a>");
+            expect (unterminated.getDocumentElement() == nullptr);
+            expect (unterminated.getLastParseError().isNotEmpty());
+        }
     }
 };
 

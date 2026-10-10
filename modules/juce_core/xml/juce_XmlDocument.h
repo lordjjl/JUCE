@@ -121,6 +121,15 @@ public:
     */
     const String& getLastParseError() const noexcept;
 
+    /** The deepest element nesting that the parser accepts. Deeper documents (including
+        nesting produced by entity expansion) fail with a parse error rather than risking
+        a stack overflow.
+    */
+    static constexpr int maxElementNestingDepth = 128;
+
+    /** The deepest chain of entities referring to other entities that the parser accepts. */
+    static constexpr int maxEntityNestingDepth = 32;
+
     /** Sets an input source object to use for parsing documents that reference external entities.
 
         If the document has been created from a file, this probably won't be needed, but
@@ -167,8 +176,15 @@ private:
     bool needToLoadDTD = false, ignoreEmptyTextElements = true;
     std::unique_ptr<InputSource> inputSource;
 
+    // Parser recursion guards: see the limits in juce_XmlDocument.cpp
+    int elementNestingDepth = 0, entityNestingDepth = 0;
+    size_t totalEntityExpansion = 0;
+    bool limitExceeded = false;
+
     std::unique_ptr<XmlElement> parseDocumentElement (String::CharPointerType, bool outer);
     void setLastError (const String&, bool carryOn);
+    void failBecauseLimitExceeded (const String&);
+    bool chargeEntityExpansion (size_t numChars);
     bool parseHeader();
     bool parseDTD();
     void skipNextWhiteSpace();

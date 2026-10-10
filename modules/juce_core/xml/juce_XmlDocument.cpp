@@ -168,6 +168,32 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElementIfTagMatches (StringR
     return {};
 }
 
+// Untrusted input must not be able to overflow the stack, so the recursive descent
+// through elements (including elements produced by DTD entity expansion) and through
+// nested entity definitions is bounded (see XmlDocument::maxElementNestingDepth and
+// maxEntityNestingDepth). Legitimate documents nest far below these limits.
+// Measured stack use of a parse of a document nested exactly maxElementNestingDepth (128)
+// deep, arm64 macOS clang: ~119 KB at -O0, ~52 KB at -O1, ~70 KB at -O3. A 256-deep cap
+// was measured at ~222 KB at -O0 and over 400 KB in some optimised builds, which
+// overflows a 256 KB thread stack, hence the lower cap.
+
+// Upper bound on the number of characters produced by entity expansion during one
+// parse, which stops "billion laughs" style documents from exhausting memory or time.
+static constexpr size_t maxTotalEntityExpansion = 8 * 1024 * 1024;
+
+namespace
+{
+    struct ScopedDepthIncrement
+    {
+        explicit ScopedDepthIncrement (int& d) noexcept : depth (d)   { ++depth; }
+        ~ScopedDepthIncrement() noexcept                              { --depth; }
+
+        int& depth;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedDepthIncrement)
+    };
+}
+
 const String& XmlDocument::getLastParseError() const noexcept
 {
     return lastError;
@@ -175,8 +201,32 @@ const String& XmlDocument::getLastParseError() const noexcept
 
 void XmlDocument::setLastError (const String& desc, const bool carryOn)
 {
+    // once a limit has been exceeded the parse has failed, so keep that error
+    if (limitExceeded)
+        return;
+
     lastError = desc;
     errorOccurred = ! carryOn;
+}
+
+bool XmlDocument::chargeEntityExpansion (size_t numChars)
+{
+    // checked before the text is allocated, so a hostile document can't grow memory unbounded
+    if (numChars > maxTotalEntityExpansion || totalEntityExpansion > maxTotalEntityExpansion - numChars)
+    {
+        failBecauseLimitExceeded ("entity expansion too large");
+        return false;
+    }
+
+    totalEntityExpansion += numChars;
+    return true;
+}
+
+void XmlDocument::failBecauseLimitExceeded (const String& desc)
+{
+    setLastError (desc, false);
+    limitExceeded = true;
+    outOfData = true;
 }
 
 String XmlDocument::getFileContents (const String& filename) const
@@ -212,6 +262,10 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
     errorOccurred = false;
     outOfData = false;
     needToLoadDTD = true;
+    elementNestingDepth = 0;
+    entityNestingDepth = 0;
+    totalEntityExpansion = 0;
+    limitExceeded = false;
 
     if (textToParse.isEmpty())
     {
@@ -230,7 +284,7 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
         lastError.clear();
         std::unique_ptr<XmlElement> result (readNextElement (! onlyReadOuterDocumentElement));
 
-        if (! errorOccurred)
+        if (! errorOccurred && ! limitExceeded)
             return result;
     }
 
@@ -403,6 +457,14 @@ void XmlDocument::readQuotedString (String& result)
 
 XmlElement* XmlDocument::readNextElement (const bool alsoParseSubElements)
 {
+    ScopedDepthIncrement depthGuard (elementNestingDepth);
+
+    if (elementNestingDepth > maxElementNestingDepth)
+    {
+        failBecauseLimitExceeded ("elements nested too deeply");
+        return nullptr;
+    }
+
     XmlElement* node = nullptr;
     skipNextWhiteSpace();
 
@@ -573,6 +635,9 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
             for (;;)
             {
+                if (limitExceeded)
+                    return;
+
                 auto c = *input;
 
                 if (c == '<')
@@ -590,6 +655,25 @@ void XmlDocument::readChildElements (XmlElement& parent)
                         }
 
                         input += closeComment + 3;
+                        continue;
+                    }
+
+                    if (input[1] == '?')
+                    {
+                        // a processing instruction inside element content is skipped just like
+                        // a comment - if we left it for the outer loop, rolling back to the
+                        // leading whitespace would put us in front of it again, forever.
+                        input += 2;
+                        auto closePI = input.indexOf (CharPointer_ASCII ("?>"));
+
+                        if (closePI < 0)
+                        {
+                            setLastError ("unterminated processing instruction", false);
+                            outOfData = true;
+                            return;
+                        }
+
+                        input += closePI + 2;
                         continue;
                     }
 
@@ -660,6 +744,14 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
             if (contentShouldBeUsed)
                 childAppender.append (XmlElement::createTextElement (textElementContent.toUTF8()));
+        }
+
+        // every pass must consume something, or malformed input could spin here forever
+        if (input == preWhitespaceInput)
+        {
+            setLastError ("XML parser made no progress", false);
+            outOfData = true;
+            break;
         }
     }
 }
@@ -803,6 +895,17 @@ String XmlDocument::expandEntity (const String& ent)
 
 String XmlDocument::expandExternalEntity (const String& entity)
 {
+    if (limitExceeded)
+        return {};
+
+    ScopedDepthIncrement depthGuard (entityNestingDepth);
+
+    if (entityNestingDepth > maxEntityNestingDepth)
+    {
+        failBecauseLimitExceeded ("entities nested too deeply");
+        return {};
+    }
+
     if (needToLoadDTD)
     {
         if (dtdText.isNotEmpty())
@@ -859,14 +962,20 @@ String XmlDocument::expandExternalEntity (const String& entity)
         {
             if (tokenisedDTD[i - 1].equalsIgnoreCase ("<!entity"))
             {
+                // The raw token is an upper bound for the trimmed, unquoted value, so charge for it
+                // before any of the trimming below allocates
+                if (! chargeEntityExpansion ((size_t) tokenisedDTD [i + 1].length()))
+                    return {};
+
                 auto ent = tokenisedDTD [i + 1].trimCharactersAtEnd (">").trim().unquoted();
 
-                // check for sub-entities..
+                // check for sub-entities.. Each replacement is followed by a scan that resumes
+                // after the replaced text, so the loop always makes forward progress.
                 auto ampersand = ent.indexOfChar ('&');
 
                 while (ampersand >= 0)
                 {
-                    auto semiColon = ent.indexOf (i + 1, ";");
+                    auto semiColon = ent.indexOfChar (ampersand + 1, ';');
 
                     if (semiColon < 0)
                     {
@@ -874,13 +983,16 @@ String XmlDocument::expandExternalEntity (const String& entity)
                         break;
                     }
 
-                    auto resolved = expandEntity (ent.substring (i + 1, semiColon));
+                    auto resolved = expandEntity (ent.substring (ampersand + 1, semiColon));
+
+                    if (limitExceeded || ! chargeEntityExpansion ((size_t) resolved.length()))
+                        return {};
 
                     ent = ent.substring (0, ampersand)
                            + resolved
                            + ent.substring (semiColon + 1);
 
-                    ampersand = ent.indexOfChar (semiColon + 1, '&');
+                    ampersand = ent.indexOfChar (ampersand + resolved.length(), '&');
                 }
 
                 return ent;
