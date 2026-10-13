@@ -1162,11 +1162,53 @@ public:
         }
 
         {
+            beginTest ("Large parameter token lists preserve order and single-pass substitution");
+
+            XmlDocument large ("<!DOCTYPE a [ <!ENTITY % p \""
+                               + String::repeatedString ("<!ENTITY e 'x'> ", 8192)
+                               + "<!ENTITY tail 'y'>\"> %p; ]><a>&e;&tail;</a>");
+            auto parsed = large.getDocumentElement();
+            expect (parsed != nullptr && parsed->hasTagName ("a") && parsed->getNumChildElements() == 1);
+
+            if (parsed != nullptr)
+                expectEquals (parsed->getAllSubText(), String ("xy"));
+
+            expect (large.getLastParseError().isEmpty());
+
+            XmlDocument unknown ("<!DOCTYPE a [ " + String::repeatedString ("%a; ", 16384)
+                                 + "<!ENTITY e 'x'> ]><a>&e;</a>");
+            parsed = unknown.getDocumentElement();
+            expect (parsed != nullptr && parsed->getAllSubText() == "x");
+            expect (unknown.getLastParseError().isEmpty());
+
+            // A declaration inserted on the right is visible to references on the left.
+            // Original declarations retain precedence, and newly inserted %refs stay literal.
+            for (const auto& dtd : { String ("<!ENTITY % defs \"<!ENTITY % p 'x'>\"> <!ENTITY e %p; > %defs;"),
+                                    String ("<!ENTITY % p 'x'> <!ENTITY % defs \"<!ENTITY % p 'y'>\"> <!ENTITY e %p; > %defs;"),
+                                    String ("<!ENTITY e %p; > <!ENTITY % %p; 'x'>") })
+            {
+                XmlDocument doc ("<!DOCTYPE a [ " + dtd + " ]><a>&e;</a>");
+                parsed = doc.getDocumentElement();
+                expect (parsed != nullptr && parsed->getAllSubText() == "x");
+                expect (doc.getLastParseError().isEmpty());
+            }
+
+            XmlDocument nested ("<!DOCTYPE a [ <!ENTITY % p '%q;'> <!ENTITY % q \"<!ENTITY e 'x'>\"> %p; ]><a>&e;</a>");
+            parsed = nested.getDocumentElement();
+            expect (parsed != nullptr && parsed->getAllSubText() == "e");
+            expectEquals (nested.getLastParseError(), String ("unknown entity"));
+        }
+
+        {
             beginTest ("External DTD reads share the expansion budget");
 
             struct Source final : InputSource
             {
-                explicit Source (String text) : contents (std::move (text)) {}
+                explicit Source (String text)
+                    : contents (std::move (text)), data (contents.toRawUTF8(), contents.getNumBytesAsUTF8())
+                {}
+
+                explicit Source (size_t numBytes) : data (numBytes, true) {}
 
                 InputStream* createInputStream() override { return nullptr; }
                 int64 hashCode() const override             { return 0; }
@@ -1176,7 +1218,7 @@ public:
                     struct Stream final : MemoryInputStream
                     {
                         explicit Stream (Source& s)
-                            : MemoryInputStream (s.contents.toRawUTF8(), s.contents.getNumBytesAsUTF8(), false),
+                            : MemoryInputStream (s.data, false),
                               source (s)
                         {}
 
@@ -1190,11 +1232,13 @@ public:
                         Source& source;
                     };
 
+                    ++streamsCreated;
                     return new Stream (*this);
                 }
 
                 String contents;
-                int bytesRead = 0;
+                MemoryBlock data;
+                int bytesRead = 0, streamsCreated = 0;
             };
 
             for (const auto size : { 1024, 1025, 8192 })
@@ -1225,6 +1269,81 @@ public:
                         expectEquals (parsed->getAllSubText(), String ("x"));
                 }
             }
+
+            beginTest ("External DTD byte budget includes discarded input");
+
+            XmlDocument discarded ("<!DOCTYPE a [ <!ENTITY % p SYSTEM 'external.dtd'> "
+                                   + String::repeatedString ("%p; ", 4096) + " ]><a>&e;</a>");
+            auto* zeroSource = new Source (size_t (1024 * 1024));
+            discarded.setInputSource (zeroSource);
+            expect (discarded.getDocumentElement() == nullptr);
+            expectEquals (discarded.getLastParseError(), String ("entity expansion too large"));
+            expect (zeroSource->streamsCreated <= 9);
+            expect (zeroSource->bytesRead <= 8 * 1024 * 1024 + 1);
+
+            // Re-parsing resets both budgets, and a small DTD remains acceptable.
+            auto* smallSource = new Source (String ("<!ENTITY e 'x'>"));
+            discarded.setInputSource (smallSource);
+            auto accepted = discarded.getDocumentElement();
+            expect (accepted != nullptr && accepted->getAllSubText() == "x");
+            expect (discarded.getLastParseError().isEmpty());
+            expectEquals (smallSource->streamsCreated, 4096);
+        }
+
+        {
+            beginTest ("Entity buffers preserve native code units");
+
+            const auto nativeBytes = [] (const String& value)
+            {
+                const auto start = value.getCharPointer();
+                const auto end = start.findTerminatingNull();
+                return String::toHexString (start.getAddress(), (int) getAddressDifference (end.getAddress(), start.getAddress()));
+            };
+
+            const auto character = String::charToString ((juce_wchar) 0x400000);
+            const auto attribute = String ("x") + character + "y";
+            const auto entity = String ("p") + character + "q&r";
+
+           #if JUCE_STRING_UTF_TYPE == 8
+            expectEquals (nativeBytes (attribute), String ("78 f0 80 80 80 79"));
+            expectEquals (nativeBytes (entity), String ("70 f0 80 80 80 71 26 72"));
+           #endif
+
+            XmlDocument direct ("<a v='x&#x400000;y'>x&#x400000;y</a>");
+            auto parsed = direct.getDocumentElement();
+            expect (parsed != nullptr);
+
+            if (parsed != nullptr)
+            {
+                expectEquals (nativeBytes (parsed->getStringAttribute ("v")), nativeBytes (attribute));
+                MemoryOutputStream expectedText;
+                expectedText << "x" << character << "y";
+                auto* text = parsed->getFirstChildElement();
+                expect (text != nullptr && text->isTextElement());
+
+                if (text != nullptr)
+                    expectEquals (nativeBytes (text->getText()), nativeBytes (String (expectedText.toUTF8())));
+            }
+
+            expect (direct.getLastParseError().isEmpty());
+
+            XmlDocument indirect ("<!DOCTYPE a [ <!ENTITY e 'p&#x400000;q&amp;r'> ]><a v='&e;s'>&e;s</a>");
+            parsed = indirect.getDocumentElement();
+            expect (parsed != nullptr);
+
+            if (parsed != nullptr)
+            {
+                expectEquals (nativeBytes (parsed->getStringAttribute ("v")), nativeBytes (entity + "s"));
+                MemoryOutputStream expectedText;
+                expectedText << entity << "s";
+                auto* text = parsed->getFirstChildElement();
+                expect (text != nullptr && text->isTextElement());
+
+                if (text != nullptr)
+                    expectEquals (nativeBytes (text->getText()), nativeBytes (String (expectedText.toUTF8())));
+            }
+
+            expect (indirect.getLastParseError().isEmpty());
         }
 
         {

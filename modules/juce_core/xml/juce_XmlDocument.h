@@ -178,7 +178,7 @@ private:
 
     // Parser recursion guards: see the limits in juce_XmlDocument.cpp
     int elementNestingDepth = 0, entityNestingDepth = 0;
-    size_t totalEntityExpansion = 0;
+    size_t totalEntityExpansion = 0, totalExternalEntityBytes = 0;
     bool limitExceeded = false;
 
     std::unique_ptr<XmlElement> parseDocumentElement (String::CharPointerType, bool outer);
@@ -197,7 +197,6 @@ private:
     String getFileContents (const String&);
     String expandEntity (const String&);
     String expandExternalEntity (const String&);
-    String getParameterEntity (const String&);
 
    #if JUCE_UNIT_TESTS
     friend class XmlElementTests;

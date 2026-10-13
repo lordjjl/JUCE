@@ -185,31 +185,82 @@ namespace
 {
     struct XmlEntityText
     {
-        void append (juce_wchar c)
-        {
-            characters.push_back (c);
-        }
-
         void append (const String& text)
         {
-            for (auto p = text.getCharPointer(); ! p.isEmpty();)
-                append (p.getAndAdvance());
+            append (text.getCharPointer(), text.getCharPointer().findTerminatingNull());
         }
 
         void append (String::CharPointerType start, String::CharPointerType end)
         {
-            while (start != end)
-                append (start.getAndAdvance());
+            characters.insert (characters.end(), start.getAddress(), end.getAddress());
         }
 
         String toString()
         {
             characters.push_back (0);
-            return String (CharPointer_UTF32 (characters.data()));
+            return String (String::CharPointerType (characters.data()),
+                           String::CharPointerType (characters.data() + characters.size() - 1));
         }
 
-        // Vector growth keeps appends amortized linear, including large attribute values.
-        std::vector<juce_wchar> characters;
+        // Preserve native code units, including non-canonical encodings. Vector growth
+        // keeps appends amortized linear, including large attribute values.
+        std::vector<String::CharPointerType::CharType> characters;
+    };
+
+    // Rebuild from right to left, just like the old in-place parameter substitution.
+    // Inserted tokens are not re-scanned, but their declarations are visible to earlier
+    // references. Index declarations so repeated unknown references also remain cheap.
+    struct XmlDTDTokenList
+    {
+        explicit XmlDTDTokenList (const StringArray& tokens)
+            : original (tokens), remaining (tokens.size())
+        {
+            for (int i = 2; i < original.size(); ++i)
+                if (original[i - 1] == "%" && original[i - 2].equalsIgnoreCase ("<!entity"))
+                    originalDefinitions.emplace (original[i], i);
+        }
+
+        const String& getToken (int index) const
+        {
+            return index < remaining ? original[index] : reversed[reversed.size() - 1 - (index - remaining)];
+        }
+
+        std::optional<std::pair<String, String>> findParameterEntity (const String& name) const
+        {
+            const auto found = originalDefinitions.find (name);
+
+            // The first original declaration still wins if its value and filename
+            // are entirely within the untouched prefix.
+            if (found != originalDefinitions.end() && found->second + 2 < remaining)
+                return std::make_pair (original[found->second + 1], original[found->second + 2]);
+
+            // Substitution can also form a declaration across the prefix/suffix boundary.
+            for (int i = jmax (2, remaining - 2); i < remaining + 2; ++i)
+                if (getToken (i) == name && getToken (i - 1) == "%"
+                                        && getToken (i - 2).equalsIgnoreCase ("<!entity"))
+                    return std::make_pair (getToken (i + 1), getToken (i + 2));
+
+            const auto expanded = expandedDefinitions.find (name);
+
+            if (expanded != expandedDefinitions.end())
+                return std::make_pair (reversed[expanded->second - 1], reversed[expanded->second - 2]);
+
+            return {};
+        }
+
+        void append (const String& token)
+        {
+            reversed.add (token);
+            const auto size = reversed.size();
+
+            if (size >= 3 && token.equalsIgnoreCase ("<!entity") && reversed[size - 2] == "%")
+                expandedDefinitions[reversed[size - 3]] = size - 3;
+        }
+
+        const StringArray& original;
+        int remaining;
+        StringArray reversed;
+        std::map<String, int> originalDefinitions, expandedDefinitions;
     };
 
     struct ScopedDepthIncrement
@@ -266,9 +317,11 @@ String XmlDocument::getFileContents (const String& filename)
 
         if (in != nullptr)
         {
-            // Allow four bytes per remaining character, plus an encoding marker.
-            // Read one extra byte to detect an overlong stream without loading it all.
-            const auto maxBytes = 4 * (maxTotalEntityExpansion - totalEntityExpansion) + 4;
+            // Bound both decoded expansion and cumulative input bytes. Separate counters
+            // avoid charging normal external text twice, while counting even zero bytes
+            // that disappear during decoding. Read one extra byte to detect overflow.
+            const auto maxBytes = jmin (4 * (maxTotalEntityExpansion - totalEntityExpansion) + 4,
+                                       maxTotalEntityExpansion - totalExternalEntityBytes);
             MemoryOutputStream data;
             data.writeFromInputStream (*in, (int64) maxBytes + 1);
 
@@ -278,6 +331,7 @@ String XmlDocument::getFileContents (const String& filename)
                 return {};
             }
 
+            totalExternalEntityBytes += data.getDataSize();
             auto contents = data.toString();
             return chargeEntityExpansion ((size_t) contents.length()) ? contents : String();
         }
@@ -312,6 +366,7 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
     elementNestingDepth = 0;
     entityNestingDepth = 0;
     totalEntityExpansion = 0;
+    totalExternalEntityBytes = 0;
     limitExceeded = false;
 
     if (textToParse.isEmpty())
@@ -1014,25 +1069,54 @@ String XmlDocument::expandExternalEntity (const String& entity)
                 }
             }
 
-            for (int i = tokenisedDTD.size(); --i >= 0;)
+            XmlDTDTokenList tokens (tokenisedDTD);
+
+            while (tokens.remaining > 0)
             {
-                if (tokenisedDTD[i].startsWithChar ('%')
-                     && tokenisedDTD[i].endsWithChar (';'))
+                const auto& token = tokenisedDTD[tokens.remaining - 1];
+                StringArray replacement;
+
+                if (token.startsWithChar ('%') && token.endsWithChar (';'))
                 {
-                    auto parsed = getParameterEntity (tokenisedDTD[i].substring (1, tokenisedDTD[i].length() - 1));
+                    const auto name = token.substring (1, token.length() - 1);
+                    String parsed;
+
+                    if (const auto declaration = tokens.findParameterEntity (name))
+                    {
+                        if (! chargeEntityExpansion ((size_t) declaration->first.length()))
+                            return {};
+
+                        const auto value = declaration->first.trimCharactersAtEnd (">");
+                        parsed = value.equalsIgnoreCase ("system")
+                                   ? getFileContents (declaration->second.trimCharactersAtEnd (">"))
+                                   : value.trim().unquoted();
+                    }
+                    else
+                    {
+                        if (! chargeEntityExpansion ((size_t) name.length()))
+                            return {};
+
+                        parsed = name;
+                    }
 
                     if (limitExceeded)
                         return {};
 
-                    StringArray newToks;
-                    newToks.addTokens (parsed, true);
-
-                    tokenisedDTD.remove (i);
-
-                    for (int j = newToks.size(); --j >= 0;)
-                        tokenisedDTD.insert (i, newToks[j]);
+                    replacement.addTokens (parsed, true);
                 }
+                else
+                {
+                    replacement.add (token);
+                }
+
+                --tokens.remaining;
+
+                for (int i = replacement.size(); --i >= 0;)
+                    tokens.append (replacement[i]);
             }
+
+            std::reverse (tokens.reversed.begin(), tokens.reversed.end());
+            tokenisedDTD.swapWith (tokens.reversed);
         }
 
         needToLoadDTD = false;
@@ -1051,21 +1135,26 @@ String XmlDocument::expandExternalEntity (const String& entity)
 
                 auto ent = tokenisedDTD [i + 1].trimCharactersAtEnd (">").trim().unquoted();
 
+                if (! ent.containsChar ('&'))
+                    return ent;
+
                 // Scan the source once and append replacements without copying the prefix.
                 XmlEntityText buffer;
                 auto text = ent.getCharPointer();
 
                 while (! text.isEmpty())
                 {
-                    auto c = text.getAndAdvance();
+                    const auto literalStart = text;
 
-                    if (c != '&')
-                    {
-                        buffer.append (c);
-                        continue;
-                    }
+                    while (! text.isEmpty() && *text != '&')
+                        ++text;
 
-                    auto ampersand = text - 1;
+                    buffer.append (literalStart, text);
+
+                    if (text.isEmpty())
+                        break;
+
+                    auto ampersand = text++;
                     auto start = text;
 
                     while (! text.isEmpty() && *text != ';')
@@ -1094,31 +1183,6 @@ String XmlDocument::expandExternalEntity (const String& entity)
 
     setLastError ("unknown entity", true);
     return entity;
-}
-
-String XmlDocument::getParameterEntity (const String& entity)
-{
-    for (int i = 0; i < tokenisedDTD.size(); ++i)
-    {
-        if (tokenisedDTD[i] == entity
-             && tokenisedDTD [i - 1] == "%"
-             && tokenisedDTD [i - 2].equalsIgnoreCase ("<!entity"))
-        {
-            if (! chargeEntityExpansion ((size_t) tokenisedDTD [i + 1].length()))
-                return {};
-
-            auto ent = tokenisedDTD [i + 1].trimCharactersAtEnd (">");
-
-            if (ent.equalsIgnoreCase ("system"))
-            {
-                return getFileContents (tokenisedDTD [i + 2].trimCharactersAtEnd (">"));
-            }
-
-            return ent.trim().unquoted();
-        }
-    }
-
-    return chargeEntityExpansion ((size_t) entity.length()) ? entity : String();
 }
 
 }
