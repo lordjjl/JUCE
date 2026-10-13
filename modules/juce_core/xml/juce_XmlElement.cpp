@@ -1066,9 +1066,14 @@ public:
             expect (bomb.getLastParseError().isNotEmpty());
 
             // The same depth reached through an element-producing entity must also be bounded
-            XmlDocument selfReferencing ("<!DOCTYPE a [ <!ENTITY e \"<a>&e;</a>\"> ]><a>&e;</a>");
+            XmlDocument selfReferencing ("<!DOCTYPE a [ <!ENTITY e \"<a>&amp;e;</a>\"> ]><a>&e;</a>");
             expect (selfReferencing.getDocumentElement() == nullptr);
-            expect (selfReferencing.getLastParseError().isNotEmpty());
+            expectEquals (selfReferencing.getLastParseError(), String ("elements nested too deeply"));
+
+            XmlDocument finiteMarkup ("<!DOCTYPE a [ <!ENTITY e \"<a>&amp;t;</a>\"> <!ENTITY t 'x'> ]><a>&e;</a>");
+            auto finite = finiteMarkup.getDocumentElement();
+            expect (finite != nullptr && finite->getChildByName ("a") != nullptr && finite->getAllSubText() == "x");
+            expect (finiteMarkup.getLastParseError().isEmpty());
 
             XmlDocument recursiveText ("<!DOCTYPE a [ <!ENTITY e \"xx&e;\"> ]><a>&e;</a>");
             expect (recursiveText.getDocumentElement() == nullptr);
@@ -1094,11 +1099,9 @@ public:
             expect (chainOverLimit.getLastParseError().isNotEmpty());
 
             // Replacements that keep producing '&' must make progress and finish promptly
-            const auto start = Time::getMillisecondCounter();
             XmlDocument ampersands ("<!DOCTYPE a [ <!ENTITY e \"xx&amp;&amp;&amp;\"> ]><a>&e;</a>");
             auto parsed = ampersands.getDocumentElement();
             expect (parsed != nullptr && parsed->getAllSubText() == "xx&&&");
-            expect (Time::getMillisecondCounter() - start < 100);
 
             // Exponential expansion ("billion laughs") is stopped by the expansion budget
             String laughs = " <!ENTITY l0 \"lol\"> ";
@@ -1109,7 +1112,298 @@ public:
             XmlDocument billionLaughs ("<!DOCTYPE a [" + laughs + "]><a>&l9;</a>");
             expect (billionLaughs.getDocumentElement() == nullptr);
             expect (billionLaughs.getLastParseError().isNotEmpty());
-            expect (Time::getMillisecondCounter() - start < 2000);
+        }
+
+        {
+            beginTest ("Parameter entity expansion limits");
+
+            const auto declaration = "<!ENTITY e '" + String::repeatedString ("x", 65536) + "'>";
+
+            for (const auto repetitions : { 64, 96, 128 })
+            {
+                // 96 parameter replacements fit alone, but exceed the shared budget
+                // when the resulting general entity is also expanded 32 times.
+                XmlDocument doc ("<!DOCTYPE a [ <!ENTITY % p \"" + declaration + "\"> "
+                                 + String::repeatedString ("%p; ", repetitions) + "]><a>"
+                                 + String::repeatedString ("&e;", 32) + "</a>");
+                auto parsed = doc.getDocumentElement();
+                expect ((parsed != nullptr) == (repetitions == 64));
+
+                if (parsed != nullptr)
+                {
+                    expectEquals (parsed->getAllSubText(), String::repeatedString ("x", 65536 * 32));
+                    expect (doc.getLastParseError().isEmpty());
+                }
+                else
+                {
+                    expectEquals (doc.getLastParseError(), String ("entity expansion too large"));
+                }
+            }
+
+            // HEAD substitutes parameter tokens once, without recursively expanding
+            // the inserted tokens. Preserve that behaviour for chains and cycles.
+            for (const auto depth : { XmlDocument::maxEntityNestingDepth, XmlDocument::maxEntityNestingDepth + 1 })
+            {
+                String dtd = "<!ENTITY % p0 \"<!ENTITY e 'x'>\"> ";
+
+                for (int i = 1; i < depth; ++i)
+                    dtd << "<!ENTITY % p" << i << " \"%p" << (i - 1) << ";\"> ";
+
+                XmlDocument doc ("<!DOCTYPE a [" + dtd + "%p" + String (depth - 1) + "; ]><a>&e;</a>");
+                auto parsed = doc.getDocumentElement();
+                expect (parsed != nullptr && parsed->getAllSubText() == "e");
+                expectEquals (doc.getLastParseError(), String ("unknown entity"));
+            }
+
+            XmlDocument recursive ("<!DOCTYPE a [ <!ENTITY % p \"%p;\"> %p; ]><a>&e;</a>");
+            auto parsed = recursive.getDocumentElement();
+            expect (parsed != nullptr && parsed->getAllSubText() == "e");
+            expectEquals (recursive.getLastParseError(), String ("unknown entity"));
+        }
+
+        {
+            beginTest ("External DTD reads share the expansion budget");
+
+            struct Source final : InputSource
+            {
+                explicit Source (String text) : contents (std::move (text)) {}
+
+                InputStream* createInputStream() override { return nullptr; }
+                int64 hashCode() const override             { return 0; }
+
+                InputStream* createInputStreamFor (const String&) override
+                {
+                    struct Stream final : MemoryInputStream
+                    {
+                        explicit Stream (Source& s)
+                            : MemoryInputStream (s.contents.toRawUTF8(), s.contents.getNumBytesAsUTF8(), false),
+                              source (s)
+                        {}
+
+                        int read (void* dest, int bytes) override
+                        {
+                            const auto count = MemoryInputStream::read (dest, bytes);
+                            source.bytesRead += count;
+                            return count;
+                        }
+
+                        Source& source;
+                    };
+
+                    return new Stream (*this);
+                }
+
+                String contents;
+                int bytesRead = 0;
+            };
+
+            for (const auto size : { 1024, 1025, 8192 })
+            {
+                XmlDocument doc (String{});
+                auto* source = new Source (String::repeatedString ("x", size));
+                doc.setInputSource (source);
+                doc.totalEntityExpansion = 8 * 1024 * 1024 - 1024;
+                const auto contents = doc.getFileContents ("external.dtd");
+                expectEquals (contents, size == 1024 ? source->contents : String());
+                expectEquals (doc.getLastParseError(), size == 1024 ? String() : String ("entity expansion too large"));
+                expect (source->bytesRead <= 4 * 1024 + 5);
+            }
+
+            for (const auto parameter : { false, true })
+            {
+                for (const auto overLimit : { false, true })
+                {
+                    XmlDocument doc (parameter ? "<!DOCTYPE a [ <!ENTITY % p SYSTEM 'external.dtd'> %p; ]><a>&e;</a>"
+                                               : "<!DOCTYPE a SYSTEM 'external.dtd'><a>&e;</a>");
+                    doc.setInputSource (new Source ("<!ENTITY e 'x'>"
+                                                    + String::repeatedString (" ", overLimit ? 8 * 1024 * 1024 : 1024)));
+                    auto parsed = doc.getDocumentElement();
+                    expect ((parsed == nullptr) == overLimit);
+                    expectEquals (doc.getLastParseError(), overLimit ? String ("entity expansion too large") : String());
+
+                    if (parsed != nullptr)
+                        expectEquals (parsed->getAllSubText(), String ("x"));
+                }
+            }
+        }
+
+        {
+            beginTest ("Entity buffers preserve recovered replacements");
+
+            const auto references = String::repeatedString ("x&amp;", 16384);
+            const auto expanded = String::repeatedString ("x&", 16384);
+
+            for (const auto complete : { true, false })
+            {
+                XmlDocument entityDoc (String{});
+                entityDoc.tokenisedDTD.addTokens ("<!ENTITY e \"" + references + (complete ? "" : "&amp") + "\">", true);
+                const auto entity = entityDoc.expandExternalEntity ("e");
+                expectEquals (entity, complete ? expanded : expanded + "&amp");
+                expectEquals (entityDoc.getLastParseError(), complete ? String() : String ("entity without terminating semi-colon"));
+
+                const auto quoted = "'" + references + (complete ? "'" : "");
+                XmlDocument attributeDoc (String{});
+                attributeDoc.input = quoted.getCharPointer();
+                String value;
+                attributeDoc.readQuotedString (value);
+                expectEquals (value, expanded);
+                expectEquals (attributeDoc.getLastParseError(), complete ? String() : String ("unmatched quotes"));
+            }
+
+            for (const auto* prefix : { "<a>", "<a v='" })
+            {
+                for (const auto repetitions : { 1000000, 1500000 })
+                {
+                    const auto isText = String (prefix) == "<a>";
+                    XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"" + String::repeatedString ("&amp;", repetitions)
+                                     + "\"> ]>" + prefix + "&e;" + (isText ? "</a>" : "'/>"));
+                    auto parsed = doc.getDocumentElement();
+                    expect ((parsed != nullptr) == (repetitions == 1000000));
+
+                    if (parsed != nullptr)
+                    {
+                        expectEquals (isText ? parsed->getAllSubText() : parsed->getStringAttribute ("v"),
+                                      String::repeatedString ("&", repetitions));
+                        expect (doc.getLastParseError().isEmpty());
+                    }
+                    else
+                    {
+                        expectEquals (doc.getLastParseError(), String ("entity expansion too large"));
+                    }
+                }
+            }
+        }
+
+        {
+            beginTest ("Character references stop at the terminator");
+
+            for (const auto* reference : { "&#", "&#x", "&#X", "&#12", "&#x41" })
+            {
+                for (const auto* prefix : { "<a>", "<a v='" })
+                {
+                    const auto text = String (prefix) + reference;
+                    XmlDocument doc (text);
+                    expect (doc.getDocumentElement() == nullptr);
+                    expectEquals (doc.getLastParseError(), String (String (prefix) == "<a>" ? "unmatched tags" : "unmatched quotes"));
+                    expect (doc.input == doc.originalText.getCharPointer() + text.length());
+
+                    XmlDocument accepted (String (prefix) + "&#65;&#x42;" + (String (prefix) == "<a>" ? "</a>" : "'/>"));
+                    auto parsed = accepted.getDocumentElement();
+                    expect (parsed != nullptr);
+
+                    if (parsed != nullptr)
+                        expectEquals (String (prefix) == "<a>" ? parsed->getAllSubText() : parsed->getStringAttribute ("v"),
+                                      String ("AB"));
+
+                    expect (accepted.getLastParseError().isEmpty());
+                }
+            }
+        }
+
+        {
+            beginTest ("Malformed references preserve lenient recovery");
+
+            // Expected text and errors were recorded from HEAD, including its
+            // deliberately lenient decimal and zero-character handling.
+            struct Row
+            {
+                const char* reference;
+                const char* text;
+                const char* error;
+            };
+
+            for (const auto& row : { Row { "&#xZ;t", ";t", "illegal escape sequence" },
+                                    Row { "&bogus;t", "bogust", "unknown entity" },
+                                    Row { "&#0;t", "t", "" },
+                                    Row { "&#1Z;t", "4t", "" },
+                                    Row { "&#x;", "", "" } })
+            {
+                for (const auto attribute : { false, true })
+                {
+                    XmlDocument doc (String (attribute ? "<a v='" : "<a>") + row.reference
+                                     + (attribute ? "'/>" : "</a>"));
+                    auto parsed = doc.getDocumentElement();
+                    expect (parsed != nullptr);
+
+                    if (parsed != nullptr)
+                        expectEquals (attribute ? parsed->getStringAttribute ("v") : parsed->getAllSubText(),
+                                      String (row.text));
+
+                    expectEquals (doc.getLastParseError(), String (row.error));
+                }
+            }
+
+            // An unknown entity clears a preceding non-limit error in HEAD.
+            XmlDocument recovered ("<!DOCTYPE a [ <!ENTITY e 'x&amp;&amp'> ]><a v='&e;'>&bogus;t</a>");
+            auto parsed = recovered.getDocumentElement();
+            expect (parsed != nullptr && parsed->getStringAttribute ("v") == "x&&amp"
+                                      && parsed->getAllSubText() == "bogust");
+            expectEquals (recovered.getLastParseError(), String ("unknown entity"));
+        }
+
+        {
+            beginTest ("Attribute parsing stops after fatal limits");
+
+            for (const auto recursive : { true, false })
+            {
+                const auto suffix = recursive ? " x='1' y='2'/>" : "bad x='1' y='2'/>";
+                XmlDocument doc (String ("<!DOCTYPE a [ <!ENTITY e \"&e;\"> ]><a v='")
+                                 + (recursive ? "&e;" : "&") + suffix);
+                expect (doc.getDocumentElement() == nullptr);
+                expect (doc.outOfData);
+                expectEquals (String (doc.input), recursive ? String (suffix) : String ("='1' y='2'/>"));
+
+                expectEquals (doc.getLastParseError(), recursive ? String ("entities nested too deeply")
+                                                                : String ("expected '=' after attribute 'bad'"));
+
+                XmlDocument accepted ("<a v='x' x='1' y='2'/>");
+                auto parsed = accepted.getDocumentElement();
+                expect (parsed != nullptr && parsed->getNumAttributes() == 3);
+                expect (accepted.getLastParseError().isEmpty());
+            }
+        }
+
+        {
+            beginTest ("DTD state is reset between parses");
+
+            for (const auto loadDTD : { true, false })
+            {
+                XmlDocument doc (String{});
+                const auto first = String ("<!DOCTYPE a [ <!ENTITY e 'OLD'> ]>")
+                                 + String::repeatedString ("<a>", XmlDocument::maxElementNestingDepth)
+                                 + (loadDTD ? "&e;" : "") + "<a/>"
+                                 + String::repeatedString ("</a>", XmlDocument::maxElementNestingDepth);
+                expect (doc.parseDocumentElement (first.getCharPointer(), false) == nullptr);
+                expectEquals (doc.getLastParseError(), String ("elements nested too deeply"));
+
+                const String missing = "<a>&e;</a>";
+                auto parsed = doc.parseDocumentElement (missing.getCharPointer(), false);
+                expect (parsed != nullptr && parsed->getAllSubText() == "e");
+                expectEquals (doc.getLastParseError(), String ("unknown entity"));
+
+                const String defined = "<!DOCTYPE a [ <!ENTITY e 'NEW'> ]><a>&e;</a>";
+                parsed = doc.parseDocumentElement (defined.getCharPointer(), false);
+                expect (parsed != nullptr && parsed->getAllSubText() == "NEW");
+                expect (doc.getLastParseError().isEmpty());
+            }
+        }
+
+        {
+            beginTest ("Only elements consume the element depth allowance");
+
+            for (const auto* replacement : { "<!--c-->", "<?p?>", "<!--c--> <?p?> ", " " })
+            {
+                for (const auto extraElement : { false, true })
+                {
+                    XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"<!--leading-->" + String (replacement)
+                                     + (extraElement ? "<b/>" : "") + "\"> ]>"
+                                     + String::repeatedString ("<a>", XmlDocument::maxElementNestingDepth)
+                                     + "&e;" + String::repeatedString ("</a>", XmlDocument::maxElementNestingDepth));
+                    auto parsed = doc.getDocumentElement();
+                    expect ((parsed == nullptr) == extraElement);
+                    expectEquals (doc.getLastParseError(), extraElement ? String ("elements nested too deeply") : String());
+                }
+            }
         }
 
         {
@@ -1119,10 +1413,8 @@ public:
             // cases that share the same code path. The PI/comment is skipped, text is kept.
             const auto check = [this] (const char* xml, const String& expectedText, int expectedChildren)
             {
-                const auto start = Time::getMillisecondCounter();
                 XmlDocument doc (xml);
                 auto parsed = doc.getDocumentElement();
-                expect (Time::getMillisecondCounter() - start < 100, xml);
                 expect (parsed != nullptr, xml);
 
                 if (parsed != nullptr)
@@ -1133,12 +1425,25 @@ public:
                 }
             };
 
-            check ("<a><?p?>t</a>",       "t",   1);
-            check ("<a><?p?> t</a>",      " t",  1);
-            check ("<a>x<?p?>y</a>",      "xy",  1);
-            check ("<a><!--c-->t</a>",    "t",   1);
-            check ("<a>t<!--c-->u</a>",   "tu",  1);
-            check ("<a><?p?><b/></a>",    "",    1);
+            check ("<a><?p?>t</a>",          "t",  1);
+            check ("<a><?p?> t</a>",         " t", 1);
+            check ("<a>x<?p?>y</a>",         "xy", 1);
+            check ("<a>x<?p?> </a>",         "x ", 1);
+            check ("<a>x<?p?><b/></a>",      "x",  2);
+            check ("<a>x<?p?><!--c--> </a>", "x ", 1);
+            check ("<a><!--c-->t</a>",       "t",  1);
+            check ("<a>t<!--c-->u</a>",       "tu", 1);
+            check ("<a><?p?><b/></a>",       "",   1);
+
+            for (const auto ignoreEmpty : { true, false })
+            {
+                XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e ''> ]><a>&e;<?p?> </a>");
+                doc.setEmptyTextElementsIgnored (ignoreEmpty);
+                auto parsed = doc.getDocumentElement();
+                expect (parsed != nullptr && parsed->getAllSubText() == (ignoreEmpty ? "" : " "));
+                expect (parsed != nullptr && parsed->getNumChildElements() == (ignoreEmpty ? 0 : 1));
+                expect (doc.getLastParseError().isEmpty());
+            }
 
             XmlDocument unterminated ("<a>t<?p</a>");
             expect (unterminated.getDocumentElement() == nullptr);

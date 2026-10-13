@@ -273,6 +273,9 @@ struct JSONParser
     {
         auto originalPos = currentLocation;
 
+        if (peekChar() == 0)
+            throwError ("Syntax error in number", currentLocation);
+
         int64 intValue = readChar() - '0';
         jassert (intValue >= 0 && intValue < 10);
 
@@ -874,6 +877,33 @@ public:
                 expect (JSON::parse (nested (100000), result).failed());
                 expect (JSON::parse (nested (257)) == var());
                 expect (JSON::parse (nested (100000)) == var());
+            }
+        }
+
+        beginTest ("Number scans stop at the terminator");
+        {
+            for (const auto* text : { "-", "- " })
+            {
+                const String source (text);
+                JSONParser parser (source.getCharPointer());
+
+                try
+                {
+                    parser.parseAny();
+                    expect (false, source);
+                }
+                catch (const JSONParser::ErrorException& error)
+                {
+                    expectEquals (error.message, String ("Syntax error in number"));
+                    expect (parser.currentLocation == source.getCharPointer() + (source == "- " ? 2 : 1));
+                }
+
+                expect (JSON::fromString (source).isVoid());
+                var result;
+                expect (JSON::parse ("[" + source, result).failed());
+                expect (JSON::parse ("[-1]", result).wasOk());
+                expectEquals ((int) result[0], -1);
+                expectEquals ((int) JSON::fromString ("-1"), -1);
             }
         }
 

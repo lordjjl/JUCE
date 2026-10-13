@@ -194,10 +194,14 @@ private:
     void readQuotedString (String&);
     void readEntity (String&);
 
-    String getFileContents (const String&) const;
+    String getFileContents (const String&);
     String expandEntity (const String&);
     String expandExternalEntity (const String&);
     String getParameterEntity (const String&);
+
+   #if JUCE_UNIT_TESTS
+    friend class XmlElementTests;
+   #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (XmlDocument)
 };
