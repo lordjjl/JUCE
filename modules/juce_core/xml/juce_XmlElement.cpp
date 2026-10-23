@@ -315,7 +315,8 @@ void XmlElement::writeElementAsText (OutputStream& outputStream,
                         outputStream << newLineChars;
 
                     child->writeElementAsText (outputStream,
-                                               lastWasTextNode ? 0 : (indentationLevel + (indentationLevel >= 0 ? 2 : 0)), lineWrapLength,
+                                               indentationLevel < 0 ? -1  // (single-line mode must stay single-line, even after a text node)
+                                                                    : (lastWasTextNode ? 0 : indentationLevel + 2), lineWrapLength,
                                                newLineChars);
                     lastWasTextNode = false;
                 }
@@ -1567,6 +1568,97 @@ public:
             XmlDocument unterminated ("<a>t<?p</a>");
             expect (unterminated.getDocumentElement() == nullptr);
             expect (unterminated.getLastParseError().isNotEmpty());
+        }
+
+        {
+            beginTest ("Single-line output with mixed content");
+
+            // A text node used to reset the indentation to 0 for the elements after it, which
+            // meant a null newline string was then written for any nested element.
+            const String longValue ("0123456789012345678901234567890123456789");
+
+            const String documents[]
+            {
+                "<a>x<b><c/></b></a>",
+                "<a><b>x<c><d/></c></b></a>",
+                "<a>x<b y=\"1\"><c/>t<d><e/></d></b>z</a>",
+                "<a>x<b p=\"" + longValue + "\" q=\"" + longValue + "\" r=\"" + longValue + "\"><c u=\"" + longValue + "\" v=\"" + longValue + "\"/></b></a>",
+                "<a>x<b>y<c>z<d>w<e/></d></c></b></a>",
+                "<a><b/>x<c><d/></c></a>"
+            };
+
+            const String header ("<?xml version=\"1.0\" encoding=\"UTF-8\"?> ");
+
+            JUCE_BEGIN_IGNORE_DEPRECATION_WARNINGS
+
+            for (const auto& document : documents)
+            {
+                const auto parsed = parseXML (document);
+                expect (parsed != nullptr, document);
+
+                if (parsed == nullptr)
+                    continue;
+
+                const auto check = [this, &document] (const String& result, const String& expected, const char* api)
+                {
+                    expectEquals (result, expected);
+                    expect (! result.containsAnyOf ("\r\n"), String (api) + ": " + document);
+                };
+
+                for (const auto lineWrapLength : { 60, 5, 0 })
+                {
+                    auto format = XmlElement::TextFormat().singleLine().withoutHeader();
+                    format.lineWrapLength = lineWrapLength;
+
+                    auto withHeader = XmlElement::TextFormat().singleLine();
+                    withHeader.lineWrapLength = lineWrapLength;
+
+                    check (parsed->toString (format), document, "toString");
+                    check (parsed->toString (withHeader), header + document, "toString with header");
+
+                    {
+                        MemoryOutputStream out;
+                        parsed->writeTo (out, format);
+                        check (out.toString(), document, "writeTo");
+                    }
+
+                    {
+                        MemoryOutputStream out;
+                        parsed->writeTo (out, withHeader);
+                        check (out.toString(), header + document, "writeTo with header");
+                    }
+
+                    check (parsed->createDocument ({}, true, false, "UTF-8", lineWrapLength), document, "createDocument");
+                    check (parsed->createDocument ({}, true, true, "UTF-8", lineWrapLength), header + document, "createDocument with header");
+
+                    {
+                        MemoryOutputStream out;
+                        parsed->writeToStream (out, {}, true, false, "UTF-8", lineWrapLength);
+                        check (out.toString(), document, "writeToStream");
+                    }
+
+                    {
+                        MemoryOutputStream out;
+                        parsed->writeToStream (out, {}, true, true, "UTF-8", lineWrapLength);
+                        check (out.toString(), header + document, "writeToStream with header");
+                    }
+                }
+            }
+
+            JUCE_END_IGNORE_DEPRECATION_WARNINGS
+
+            // The multi-line layout must not have changed
+            {
+                const auto parsed = parseXML ("<a>x<b><c/></b></a>");
+                expect (parsed != nullptr);
+
+                if (parsed != nullptr)
+                {
+                    auto format = XmlElement::TextFormat().withoutHeader();
+                    format.newLineChars = "\n";
+                    expectEquals (parsed->toString (format), String ("<a>x<b>\n  <c/>\n</b>\n</a>\n"));
+                }
+            }
         }
     }
 };
