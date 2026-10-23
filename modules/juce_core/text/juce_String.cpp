@@ -92,7 +92,18 @@ public:
         if (text.getAddress() == nullptr || text.isEmpty())
             return CharPointerType (emptyString.text);
 
-        auto bytesNeeded = sizeof (CharType) + CharPointerType::getBytesRequiredFor (text);
+        // When source and destination are both UTF-8, writeAll() copies the raw bytes up to the
+        // terminator, so the allocation must be sized from the raw byte length too. (Sizing from
+        // the decoded characters would be too small for malformed input, where the decoder yields
+        // fewer or shorter characters than there are bytes.) Every other combination converts, so
+        // both the size and the copy go through the decoder.
+        size_t bytesNeeded = 0;
+
+        if constexpr (std::is_same_v<CharPointer, CharPointer_UTF8> && std::is_same_v<CharPointerType, CharPointer_UTF8>)
+            bytesNeeded = text.sizeInBytes();
+        else
+            bytesNeeded = sizeof (CharType) + CharPointerType::getBytesRequiredFor (text);
+
         auto dest = createUninitialisedBytes (bytesNeeded);
         CharPointerType (dest).writeAll (text);
         return dest;
@@ -3010,6 +3021,282 @@ public:
 
             for (auto c : str)
                 expectEquals (c, parts[index++]);
+        }
+
+        beginTest ("Malformed UTF-8");
+        {
+            struct Input
+            {
+                const char* bytes;
+                bool valid;
+            };
+
+            // (string literals are split wherever a hex escape would otherwise swallow the next character)
+            const Input inputs[]
+            {
+                { "", true },
+                { "a", true },
+                { "hello world", true },
+                { "\xc3\xa9", true },
+                { "\xe2\x82\xac", true },
+                { "\xf0\x9f\x98\x80", true },
+                { "a\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80" "z", true },
+                { "\xc2\xaf\\_(\xe3\x83\x84)_/\xc2\xaf", true },
+                { "\xf4\x8f\xbf\xbf", true },
+
+                // Truncated leads
+                { "\xc3", false },
+                { "\xe2", false },
+                { "\xe2\x82", false },
+                { "\xf0", false },
+                { "\xf0\x9f", false },
+                { "\xf0\x9f\x98", false },
+                { "abc\xe2", false },
+                { "abc\xf0\x9f\x98", false },
+
+                // Lone continuation bytes
+                { "\x80", false },
+                { "\x80" "12", false },
+                { "\x80" "0123456789", false },
+                { "\xbf" "abcdefghijklmnop", false },
+                { "a\x80" "b", false },
+                { "\xc3\xa9\xa9\xa9", false },
+                { "ab\xa9" "cd", false },
+
+                // Lead bytes that are followed by something other than a continuation
+                { "\xe2\x41\x42", false },
+                { "\xf0\x9f\x41" "bcdef", false },
+                { "\xc3" "abcdefghij", false },
+
+                // 5 and 6 byte leads, and bytes that can never appear
+                { "\xf8\x88\x80\x80\x80", false },
+                { "\xf8\x88\x80\x80\x80" "abc", false },
+                { "\xfc\x84\x80\x80\x80\x80", false },
+                { "\xfe\xff", false },
+                { "\xff", false },
+                { "\xff" "0123456789", false },
+
+                // Overlong encodings, surrogates and out-of-range code points
+                { "\xc0\x80", false },
+                { "\xc0\xaf", false },
+                { "\xe0\x80\xaf", false },
+                { "\xf0\x80\x80\xaf", false },
+                { "\xed\xa0\x80", false },
+                { "\xf4\x90\x80\x80", false },
+            };
+
+            // What the decoder yields for the input, re-encoded and stopping at the first decoded null
+            const auto reencode = [] (const char* utf8, size_t maxChars)
+            {
+                std::string result;
+                CharPointer_UTF8 p (utf8);
+
+                for (size_t i = 0; i < maxChars; ++i)
+                {
+                    const auto c = p.getAndAdvance();
+
+                    if (c == 0)
+                        break;
+
+                    char scratch[8] = {};
+                    CharPointer_UTF8 writer (scratch);
+                    writer.write (c);
+                    result.append (scratch, (size_t) (writer.getAddress() - scratch));
+                }
+
+                return result;
+            };
+
+            for (const auto& input : inputs)
+            {
+                const std::string raw (input.bytes);
+                const auto label = String::toHexString (input.bytes, (int) raw.size());
+                const auto decoded = reencode (input.bytes, std::numeric_limits<size_t>::max());
+
+                if (input.valid)
+                {
+                    expect (decoded == raw, label);
+                    expect (CharPointer_UTF8::isValidString (input.bytes, (int) raw.size() + 1), label);
+                }
+
+                // The stored bytes must be what the constructor promises, the size reported must never
+                // exceed what is stored and iteration must land exactly on the terminator.
+                // 'decodedContent' strings hold the re-encoded characters, so their size and length
+                // are exactly consistent; strings that keep raw malformed bytes only promise to stay in bounds.
+                const auto checkString = [this, &label] (const String& s, const std::string& expected, bool decodedContent, const char* constructor)
+                {
+                    const auto where = String (constructor) + " " + label;
+                    const std::string stored (s.toRawUTF8());
+
+                    expect (stored == expected, where);
+
+                    if (decodedContent)
+                        expectEquals ((int) s.getNumBytesAsUTF8(), (int) stored.size(), where);
+                    else
+                        expect (s.getNumBytesAsUTF8() <= stored.size(), where);
+
+                    auto it = s.toUTF8();
+                    size_t numSteps = 0;
+
+                    while (! it.isEmpty())
+                    {
+                        ++it;
+                        ++numSteps;
+                    }
+
+                    expect (it.getAddress() == s.toRawUTF8() + stored.size(), where);
+
+                    size_t numLoopSteps = 0;
+
+                    for (auto c : s)
+                    {
+                        ignoreUnused (c);
+                        ++numLoopSteps;
+                    }
+
+                    expectEquals ((int) numLoopSteps, (int) numSteps, where);
+
+                    if (decodedContent)
+                        expectEquals ((int) s.length(), (int) numSteps, where);
+                };
+
+                // The unbounded constructor copies the raw bytes up to the terminator, and must size its
+                // allocation from them
+                checkString (String (CharPointer_UTF8 (input.bytes)), raw, input.valid, "unbounded");
+
+                if (input.valid)
+                    checkString (String (CharPointer_UTF8 (input.bytes)) + "tail", raw + "tail", true, "unbounded + append");
+
+                // The bounded constructor decodes both when sizing and when copying
+                for (const size_t maxChars : { (size_t) 1, (size_t) 2, (size_t) 3, (size_t) 1000 })
+                    checkString (String (CharPointer_UTF8 (input.bytes), maxChars), reencode (input.bytes, maxChars), true, "maxChars");
+
+                // (fromUTF8 only asserts that its input is valid, so it is only used with valid strings here)
+                if (input.valid)
+                {
+                    checkString (String::fromUTF8 (input.bytes, -1), raw, true, "fromUTF8 unterminated");
+                    checkString (String::fromUTF8 (input.bytes, (int) raw.size()), raw, true, "fromUTF8 sized");
+                }
+
+                // The range constructor copies bytes verbatim, but must never exceed the range it is given
+                const String ranged { CharPointer_UTF8 (input.bytes), CharPointer_UTF8 (input.bytes + raw.size()) };
+                expect (std::strlen (ranged.toRawUTF8()) <= raw.size(), label);
+
+                if (input.valid)
+                    checkString (ranged, raw, true, "range");
+            }
+
+            // Legacy results that must not change: malformed bytes are stored as given
+            expect (std::string (String (CharPointer_UTF8 ("\xc0\xaf")).toRawUTF8()) == "\xc0\xaf");
+            expect (std::string (String (CharPointer_UTF8 ("\x80" "12")).toRawUTF8()) == "\x80" "12");
+
+            // Every raw byte must be stored (and the allocation must have room for them all)
+            {
+                const String s (CharPointer_UTF8 ("\x80" "0123456789"));
+                expectEquals ((int) std::strlen (s.toRawUTF8()), 11);
+                expect (std::string (s.toRawUTF8()) == "\x80" "0123456789");
+                expect (s.getNumBytesAsUTF8() <= 11);
+            }
+        }
+
+        beginTest ("UTF-8 pointer increment stops at the terminator");
+        {
+            struct Case
+            {
+                std::array<char, 8> bytes;
+                int expectedOffset;
+                bool wellFormed;
+            };
+
+            // A lead byte skips as many bytes as it advertises, whatever they are (this is the long-standing
+            // behaviour), but the skip stops at a terminating null.
+            const Case cases[]
+            {
+                { { 'a', 'b', 0, 0, 0, 0, 0, 0 }, 1, true },
+                { { '\xc3', '\xa9', 'a', 'b', 0, 0, 0, 0 }, 2, true },
+                { { '\xe2', '\x82', '\xac', 'a', 0, 0, 0, 0 }, 3, true },
+                { { '\xf0', '\x9f', '\x98', '\x80', 'a', 0, 0, 0 }, 4, true },
+                { { '\xc3', 0, 'a', 'b', 'c', 'd', 'e', 0 }, 1, false },
+                { { '\xe2', 0, 'a', 'b', 'c', 'd', 'e', 0 }, 1, false },
+                { { '\xe2', '\x82', 0, 'a', 'b', 'c', 'd', 0 }, 2, false },
+                { { '\xf0', '\x9f', 0, 'a', 'b', 'c', 'd', 0 }, 2, false },
+                { { '\xf0', '\x9f', '\x98', 0, 'a', 'b', 'c', 0 }, 3, false },
+                { { '\xf8', '\x88', 0, 'a', 'b', 'c', 'd', 0 }, 2, false },
+                { { '\xff', 0, 'a', 'b', 'c', 'd', 'e', 0 }, 1, false },
+                { { '\xbf', 0, 'a', 'b', 'c', 'd', 'e', 0 }, 1, false },
+                { { '\x80', 'a', 'b', 'c', 0, 0, 0, 0 }, 1, false },
+                { { '\xc3', '\xc0', 'a', 'b', 0, 0, 0, 0 }, 2, false },
+                { { '\xe2', 'a', 'b', 'c', 'd', 0, 0, 0 }, 3, false },
+                { { '\xf0', '\x9f', 'a', 'b', 'c', 0, 0, 0 }, 4, false },
+                { { '\xff', 'a', 'b', 'c', 'd', 0, 0, 0 }, 4, false },
+            };
+
+            for (const auto& c : cases)
+            {
+                const auto label = String::toHexString (c.bytes.data(), 4);
+
+                CharPointer_UTF8 incremented (c.bytes.data());
+                ++incremented;
+                expect (incremented.getAddress() == c.bytes.data() + c.expectedOffset, label);
+
+                CharPointer_UTF8 postIncremented (c.bytes.data());
+                postIncremented++;
+                expect (postIncremented.getAddress() == incremented.getAddress(), label);
+
+                if (c.wellFormed)
+                {
+                    CharPointer_UTF8 decoded (c.bytes.data());
+                    decoded.getAndAdvance();
+                    expect (decoded.getAddress() == incremented.getAddress(), label);
+                }
+            }
+        }
+
+        beginTest ("UTF-8 validation stops at the terminator");
+        {
+            const auto isValid = [] (std::initializer_list<int> bytes, int maxBytes = std::numeric_limits<int>::max())
+            {
+                std::vector<char> data;
+
+                for (auto b : bytes)
+                    data.push_back ((char) b);
+
+                // Terminator, followed by bytes that could be mistaken for continuations
+                for (auto b : { 0, 0x80, 0x80, 0x80, 0 })
+                    data.push_back ((char) b);
+
+                return CharPointer_UTF8::isValidString (data.data(), maxBytes);
+            };
+
+            expect (isValid ({}));
+            expect (isValid ({ 'a', 'b', 'c' }));
+            expect (isValid ({ 0xc3, 0xa9 }));
+            expect (isValid ({ 0xe2, 0x82, 0xac }));
+            expect (isValid ({ 0xf0, 0x9f, 0x98, 0x80 }));
+            expect (isValid ({ 0xf4, 0x8f, 0xbf, 0xbf }));
+
+            // A terminator inside a sequence ends the string: truncated, so invalid, and never read past
+            expect (! isValid ({ 0xe2 }));
+            expect (! isValid ({ 0xe2, 0, 0x82, 0xac }));
+            expect (! isValid ({ 0xe2, 0x82 }));
+            expect (! isValid ({ 0xf0, 0x9f, 0x98 }));
+            expect (! isValid ({ 0xf0, 0x9f, 0x98, 0, 0x80 }));
+            expect (! isValid ({ 0xc3 }));
+
+            expect (! isValid ({ 0x80 }));
+            expect (! isValid ({ 0xc0, 0x80 }));
+            expect (! isValid ({ 0xed, 0xa0, 0x80 }));
+            expect (! isValid ({ 0xf4, 0x90, 0x80, 0x80 }));
+            expect (! isValid ({ 0xf8, 0x88, 0x80, 0x80, 0x80 }));
+
+            // Legacy results, kept for compatibility: the continuation bytes are not individually checked
+            expect (isValid ({ 0xc3, 0xc0 }));
+            expect (isValid ({ 0xc3, 'a' }));
+            expect (isValid ({ 0xe2, 0x82, 'a' }));
+
+            expect (isValid ({ 0xe2, 0x82, 0xac }, 3));
+            expect (! isValid ({ 0xe2, 0x82, 0xac }, 2));
+            expect (isValid ({ 'a', 'b' }, 1));
         }
     }
 };

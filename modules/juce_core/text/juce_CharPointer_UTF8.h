@@ -131,6 +131,14 @@ public:
 
             while ((static_cast<uint8> (n) & bit) != 0 && bit > 0x8)
             {
+                // Skip the advertised width as always, but never past the terminating null
+                // (a truncated sequence must not carry us beyond the end of the string).
+                // A NUL inside a multi-byte sequence is now deliberately treated as the terminator:
+                // JUCE strings are NUL-terminated, so an unbounded reader cannot tell an embedded NUL
+                // from the real one. This is a deliberate exception to byte-compatibility.
+                if (*data == 0)
+                    break;
+
                 ++data;
                 bit = static_cast<uint8> (bit >> 1);
             }
@@ -542,8 +550,17 @@ public:
                 if (++codeUnitIndex >= maxCodeUnitsToRead)
                     return false;
 
+                const auto nextByte = (uint8_t) codeUnits[codeUnitIndex];
+
+                // A null in the middle of a sequence is the end of the string, and the sequence is
+                // truncated: stop here rather than reading past the terminator. (Deliberate exception
+                // to byte-compatibility: JUCE strings are NUL-terminated, so an unbounded reader cannot
+                // tell an embedded NUL from the real terminator.)
+                if (nextByte == 0)
+                    return false;
+
                 bytes <<= 8;
-                bytes |= (uint32_t) (uint8_t) codeUnits[codeUnitIndex];
+                bytes |= (uint32_t) nextByte;
             }
 
             if (constexpr uint32_t firstTwoByteCodePoint = 0xc280; bytes < firstTwoByteCodePoint)
