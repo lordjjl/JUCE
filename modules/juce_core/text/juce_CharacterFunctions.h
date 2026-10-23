@@ -299,7 +299,10 @@ public:
                 {
                     if (numSigFigs >= maxSignificantDigits)
                     {
-                        ++extraExponent;
+                        // (saturating, so an absurdly long digit string can't overflow the counter)
+                        if (extraExponent < std::numeric_limits<int>::max())
+                            ++extraExponent;
+
                         continue;
                     }
 
@@ -373,26 +376,35 @@ public:
             {
                 auto digit = (int) text.getAndAdvance() - '0';
 
+                // Saturate rather than overflow; all the digits are still consumed, and any
+                // exponent this large is out of double range anyway.
                 if (digit != 0 || exponent != 0)
-                    exponent = (exponent * 10) + digit;
+                    exponent = exponent > (std::numeric_limits<int>::max() - digit) / 10
+                                 ? std::numeric_limits<int>::max()
+                                 : (exponent * 10) + digit;
             }
 
             if (text == startOfExponentDigits)
                 text = startOfExponent;
 
-            exponent = extraExponent + (parsedExponentIsPositive ? exponent : -exponent);
+            // (64-bit, so that two saturated values can't overflow when combined)
+            const auto combinedExponent = (int64) extraExponent + (parsedExponentIsPositive ? (int64) exponent : -(int64) exponent);
 
-            if (exponent < 0)
+            if (combinedExponent < 0)
             {
-                if (exponent < std::numeric_limits<double>::min_exponent10 - 1)
+                if (combinedExponent < std::numeric_limits<double>::min_exponent10 - 1)
                     return isNegative ? -0.0 : 0.0;
 
                 *writePtr++ = '-';
-                exponent = -exponent;
+                exponent = (int) -combinedExponent;
             }
-            else if (exponent > std::numeric_limits<double>::max_exponent10 + 1)
+            else if (combinedExponent > std::numeric_limits<double>::max_exponent10 + 1)
             {
                 return isNegative ? -inf : inf;
+            }
+            else
+            {
+                exponent = (int) combinedExponent;
             }
 
             writeExponentDigits (exponent, writePtr);

@@ -546,6 +546,53 @@ public:
                 expect (charPtr == CharPointerType { (CharType*) data.getData() }.findEndOfWhitespace());
             }
         }
+
+        beginTest ("readDoubleValue exponent and digit-count limits");
+        {
+            constexpr auto inf = std::numeric_limits<double>::infinity();
+
+            const auto expectValue = [this] (const std::string& text, double expected)
+            {
+                auto block = convert<CharPointer_ASCII, CharPointerType> (memoryBlockFromCharPtr<CharPointer_ASCII> (text.c_str()));
+                CharPointerType charPtr { (CharType*) block.getData() };
+                const auto result = CharacterFunctions::readDoubleValue (charPtr);
+
+                expect (result == expected, String (text).substring (0, 40));
+                expect (std::signbit (result) == std::signbit (expected), String (text).substring (0, 40));
+                expect (charPtr.isEmpty(), "all digits consumed: " + String (text).substring (0, 40));
+            };
+
+            expectValue ("1e400", inf);
+            expectValue ("-1e400", -inf);
+            expectValue ("1e-400", 0.0);
+            expectValue ("-1e-400", -0.0);
+            expectValue ("1e999999999", inf);
+            expectValue ("1e2147483647", inf);
+            expectValue ("1e2147483648", inf);
+            expectValue ("1e4294967296", inf);
+            expectValue ("1e4294967297", inf);
+            expectValue ("1e99999999999999999999999999", inf);
+            expectValue ("-1e99999999999999999999999999", -inf);
+            expectValue ("1e-2147483647", 0.0);
+            expectValue ("1e-2147483648", 0.0);
+            expectValue ("1e-2147483649", 0.0);
+            expectValue ("1e-4294967296", 0.0);
+            expectValue ("1e-99999999999999999999999999", 0.0);
+            expectValue ("-1e-99999999999999999999999999", -0.0);
+            expectValue ("1e+0000000000000000000000000000000000002", 100.0);
+
+            // More integer digits than the significant-digit limit, with and without an exponent
+            expectValue ("1" + std::string (400, '0') + "e-390", 1e10);
+            expectValue ("1" + std::string (1099, '0') + "e-1090", 1e9);
+            expectValue ("1" + std::string (400, '0'), inf);
+
+            // Legacy result, kept for compatibility: with no exponent the number of dropped integer
+            // digits is written into a three digit exponent buffer, so 1000 or more of them lose the
+            // exponent altogether and only the 18 significant digits survive
+            expectValue ("1" + std::string (1017, '0'), 1e17);
+            expectValue ("1" + std::string (400, '0') + "e-2147483648", 0.0);
+            expectValue ("1" + std::string (400, '0') + "e2147483648", inf);
+        }
     }
 };
 

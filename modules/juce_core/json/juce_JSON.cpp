@@ -273,11 +273,30 @@ struct JSONParser
     {
         auto originalPos = currentLocation;
 
+        // Re-reads the whole token as a double
+        const auto parseAsDouble = [&]
+        {
+            currentLocation = originalPos;
+            auto asDouble = CharacterFunctions::readDoubleValue (currentLocation);
+            return var (isNegative ? -asDouble : asDouble);
+        };
+
         if (peekChar() == 0)
             throwError ("Syntax error in number", currentLocation);
 
-        int64 intValue = readChar() - '0';
-        jassert (intValue >= 0 && intValue < 10);
+        // The first character is not validated: a '-' followed by a non-digit has always been
+        // accepted, with that character read as (c - '0'), e.g. "-x" gives -72. That legacy
+        // behaviour is kept, now with overflow-checked signed arithmetic.
+        // (deliberately the original expression: the subtraction happens in juce_wchar's own type,
+        // which is unsigned on some platforms, and that wrap-around is part of the legacy result)
+        const int64 firstValue = readChar() - '0';
+        const bool startsWithDigit = firstValue >= 0 && firstValue < 10;
+
+        // For ordinary numbers the magnitude is accumulated unsigned and overflow-checked: a
+        // literal beyond the int64 range (or a long digit string) must never invoke signed overflow.
+        uint64 magnitude = startsWithDigit ? (uint64) firstValue : 0;
+        int64 legacyValue = firstValue;
+        bool magnitudeOverflowed = false;
 
         for (;;)
         {
@@ -287,16 +306,30 @@ struct JSONParser
 
             if (isPositiveAndBelow (digit, 10))
             {
-                intValue = intValue * 10 + digit;
+                if (! magnitudeOverflowed)
+                {
+                    if (startsWithDigit)
+                    {
+                        if (magnitude > (std::numeric_limits<uint64>::max() - (uint64) digit) / 10)
+                            magnitudeOverflowed = true;
+                        else
+                            magnitude = magnitude * 10 + (uint64) digit;
+                    }
+                    else
+                    {
+                        if (legacyValue > (std::numeric_limits<int64>::max() - digit) / 10
+                             || legacyValue < std::numeric_limits<int64>::min() / 10)
+                            magnitudeOverflowed = true;
+                        else
+                            legacyValue = legacyValue * 10 + digit;
+                    }
+                }
+
                 continue;
             }
 
             if (c == 'e' || c == 'E' || c == '.')
-            {
-                currentLocation = originalPos;
-                auto asDouble = CharacterFunctions::readDoubleValue (currentLocation);
-                return var (isNegative ? -asDouble : asDouble);
-            }
+                return parseAsDouble();
 
             if (CharacterFunctions::isWhitespace (c)
                  || c == ',' || c == '}' || c == ']' || c == 0)
@@ -308,10 +341,30 @@ struct JSONParser
             throwError ("Syntax error in number", lastPos);
         }
 
-        auto correctedValue = isNegative ? -intValue : intValue;
+        if (! startsWithDigit)
+        {
+            // (the legacy path: the result is -legacyValue as an int or int64, as it always was)
+            if (magnitudeOverflowed || legacyValue == std::numeric_limits<int64>::min())
+                return parseAsDouble();
 
-        return (intValue >> 31) != 0 ? var (correctedValue)
-                                     : var ((int) correctedValue);
+            const auto legacyCorrected = isNegative ? -legacyValue : legacyValue;
+
+            return (legacyValue >> 31) != 0 ? var (legacyCorrected)
+                                            : var ((int) legacyCorrected);
+        }
+
+        // (-2^63 is the one value whose magnitude does not fit a positive int64)
+        const auto maxMagnitude = (uint64) std::numeric_limits<int64>::max() + (isNegative ? 1u : 0u);
+
+        // Too big for an int64: treat the whole token as a double, as for any other decimal
+        if (magnitudeOverflowed || magnitude > maxMagnitude)
+            return parseAsDouble();
+
+        const auto correctedValue = isNegative ? (int64) (0 - magnitude)  // (unsigned negation, converted back; exact for -2^63)
+                                               : (int64) magnitude;
+
+        return (magnitude >> 31) != 0 ? var (correctedValue)
+                                      : var ((int) correctedValue);
     }
 
     var parseObject()
@@ -905,6 +958,130 @@ public:
                 expectEquals ((int) result[0], -1);
                 expectEquals ((int) JSON::fromString ("-1"), -1);
             }
+        }
+
+        beginTest ("Integer and exponent range limits");
+        {
+            enum class Kind { int32, int64, real };
+
+            struct Case
+            {
+                std::string text;
+                Kind kind;
+                int64 integer;
+                double real;
+            };
+
+            constexpr auto inf = std::numeric_limits<double>::infinity();
+            constexpr auto int64Min = std::numeric_limits<int64>::min();
+            constexpr auto int64Max = std::numeric_limits<int64>::max();
+
+            const std::vector<Case> cases
+            {
+                { "0",                        Kind::int32, 0, 0.0 },
+                { "-0",                       Kind::int32, 0, 0.0 },
+                { "2147483647",               Kind::int32, 2147483647, 0.0 },
+                { "-2147483647",              Kind::int32, -2147483647, 0.0 },
+                { "2147483648",               Kind::int64, 2147483648, 0.0 },
+                { "-2147483648",              Kind::int64, -2147483648LL, 0.0 },
+                { "9223372036854775806",      Kind::int64, int64Max - 1, 0.0 },
+                { "9223372036854775807",      Kind::int64, int64Max, 0.0 },
+                { "-9223372036854775807",     Kind::int64, int64Min + 1, 0.0 },
+                { "-9223372036854775808",     Kind::int64, int64Min, 0.0 },
+                { "00000000000000000000000000000000009223372036854775807", Kind::int64, int64Max, 0.0 },
+                { "-00000000000000000000000000000000009223372036854775808", Kind::int64, int64Min, 0.0 },
+                { "00000000000000000000000000000000000000001", Kind::int32, 1, 0.0 },
+
+                // One beyond the int64 range becomes a double
+                { "9223372036854775808",      Kind::real, 0, 9223372036854775808.0 },
+                { "-9223372036854775809",     Kind::real, 0, -9223372036854775808.0 },
+                { "18446744073709551615",     Kind::real, 0, 18446744073709551616.0 },
+                { "18446744073709551616",     Kind::real, 0, 18446744073709551616.0 },
+                { "-18446744073709551616",    Kind::real, 0, -18446744073709551616.0 },
+                { "99999999999999999999",     Kind::real, 0, 1e20 },
+                { "12345678901234567890123",  Kind::real, 0, 1.2345678901234568e22 },
+                { "-12345678901234567890123", Kind::real, 0, -1.2345678901234568e22 },
+                { "123456789012345678901234567890123456789012345678901234567890", Kind::real, 0, 1.2345678901234568e59 },
+
+                // Long mantissas
+                { std::string (400, '9'),            Kind::real, 0, inf },
+                { "-" + std::string (400, '9'),      Kind::real, 0, -inf },
+                { "1" + std::string (400, '0'),      Kind::real, 0, inf },
+                { "1" + std::string (1017, '0'),     Kind::real, 0, 1e17 },  // (legacy result, kept for compatibility)
+                { "1" + std::string (400, '0') + "e-390", Kind::real, 0, 1e10 },
+                { "1" + std::string (1099, '0') + "e-1090", Kind::real, 0, 1e9 },
+
+                // Exponents
+                { "1e400",                    Kind::real, 0, inf },
+                { "-1e400",                   Kind::real, 0, -inf },
+                { "1e-400",                   Kind::real, 0, 0.0 },
+                { "-1e-400",                  Kind::real, 0, 0.0 },
+                { "1e999999999",              Kind::real, 0, inf },
+                { "1E999999999",              Kind::real, 0, inf },
+                { "1e2147483647",             Kind::real, 0, inf },
+                { "1e2147483648",             Kind::real, 0, inf },
+                { "1e4294967296",             Kind::real, 0, inf },
+                { "1e99999999999999999999",   Kind::real, 0, inf },
+                { "1e-999999999",             Kind::real, 0, 0.0 },
+                { "1e-2147483648",            Kind::real, 0, 0.0 },
+                { "1e-2147483649",            Kind::real, 0, 0.0 },
+                { "1e-4294967296",            Kind::real, 0, 0.0 },
+                { "1e-99999999999999999999",  Kind::real, 0, 0.0 },
+                { "1.5e3",                    Kind::real, 0, 1500.0 },
+                { "-2.5e-1",                  Kind::real, 0, -0.25 },
+                { "1" + std::string (400, '0') + "e-2147483648", Kind::real, 0, 0.0 },
+                { "1" + std::string (400, '0') + "e2147483648",  Kind::real, 0, inf },
+            };
+
+            for (const auto& c : cases)
+            {
+                const auto text = String (c.text);
+                const auto label = text.substring (0, 40);
+                const var values[] { JSON::fromString (text), JSON::parse ("[" + text + "]")[0] };
+
+                for (const auto& v : values)
+                {
+                    switch (c.kind)
+                    {
+                        case Kind::int32:
+                            expect (v.isInt(), label);
+                            expect (v.isInt() && (int64) (int) v == c.integer, label);
+                            break;
+
+                        case Kind::int64:
+                            expect (v.isInt64(), label);
+                            expect (v.isInt64() && (int64) v == c.integer, label);
+                            break;
+
+                        case Kind::real:
+                        {
+                            expect (v.isDouble(), label);
+                            const auto d = (double) v;
+                            const auto tolerance = std::abs (c.real) * 1e-15;
+                            expect (d == c.real || (std::isfinite (c.real) && std::abs (d - c.real) <= tolerance), label);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Legacy results, kept for compatibility: the first character after a '-' is not validated,
+            // and is read as (character - '0')
+            expect (JSON::fromString ("-x").isInt() && (int) JSON::fromString ("-x") == -72);
+            {
+                // ('.' - '0') is computed in juce_wchar's type, as the parser does, so this holds on every platform
+                const int64 expected = -((int64) (juce_wchar ('.') - '0') * 10 + 5);
+                expect (JSON::fromString ("-.5").isInt64() && (int64) JSON::fromString ("-.5") == expected);
+            }
+            expect (JSON::fromString ("-").isVoid());
+            expect (JSON::fromString ("9223372036854775808x").isVoid());
+
+            // A big integer followed by more tokens must stop at the right place
+            var parsed;
+            expect (JSON::parse ("[9223372036854775808, 5, -9223372036854775809 ,-9223372036854775808]", parsed).wasOk());
+            expect (parsed.isArray() && parsed.size() == 4);
+            expect (parsed[1].isInt() && (int) parsed[1] == 5);
+            expect (parsed[3].isInt64() && (int64) parsed[3] == int64Min);
         }
 
         beginTest ("Fuzz tests");
