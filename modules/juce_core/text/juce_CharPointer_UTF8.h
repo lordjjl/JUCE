@@ -214,7 +214,11 @@ public:
         }
         else
         {
-            while (--numToSkip >= 0)
+            // Callers such as XmlDocument count characters with getAndAdvance(), which only consumes
+            // real continuation bytes, and then replay that count here. A malformed lead byte makes
+            // operator++ skip its full advertised width, so the replay can run further than the count
+            // did. Never let it cross the terminating null.
+            while (--numToSkip >= 0 && *data != 0)
                 ++*this;
         }
 

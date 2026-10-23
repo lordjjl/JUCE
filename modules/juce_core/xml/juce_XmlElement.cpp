@@ -1571,6 +1571,82 @@ public:
         }
 
         {
+            beginTest ("Malformed UTF-8 lead bytes never carry the parser past the end");
+
+            // The parser counts characters with getAndAdvance(), which only consumes real
+            // continuation bytes, and then replays that count with CharPointer_UTF8::operator+=,
+            // which skips a malformed lead byte's full advertised width. Each input below ends
+            // right at the buffer end, so a replay that crosses the terminator reads off the heap.
+            struct Row
+            {
+                const char* name;
+                std::vector<uint8> bytes;
+                const char* expectedError; // nullptr when only completion is checked
+            };
+
+            const Row rows[]
+            {
+                { "comment",
+                  { 0x3c, 0x72, 0x3e, 0x3c, 0x21, 0x2d, 0x2d, 0x20, 0x63, 0x6f, 0xb7, 0x3e, 0x36, 0xff,
+                    0x6d, 0x6d, 0x65, 0x6e, 0x20, 0x2d, 0x2d, 0x3e },
+                  "unmatched tags" },
+                { "nested closing tags",
+                  { 0x3c, 0x61, 0x3e, 0x3c, 0x62, 0x3e, 0x3c, 0x63, 0x3e, 0x3c, 0x64, 0x3e, 0x3c, 0x65, 0x3e,
+                    0x64, 0x65, 0x65, 0x70, 0x3c, 0x2f, 0x64, 0x3e, 0x3c, 0x2f, 0x63, 0x3e, 0x3c, 0x2f, 0x62,
+                    0x3e, 0x3c, 0x2f, 0x61, 0x99, 0x1d, 0xfe, 0x75, 0xe7, 0xdd, 0x3e },
+                  "unmatched tags" },
+                { "processing instruction",
+                  { 0x3c, 0x72, 0x3e, 0x3c, 0x3f, 0x78, 0x20, 0x63, 0x6f, 0xb7, 0x3e, 0x36, 0xff,
+                    0x6d, 0x6d, 0x65, 0x6e, 0x20, 0x3f, 0x3e },
+                  nullptr },
+                { "closing tag",
+                  { 0x3c, 0x61, 0x3e, 0x64, 0x3c, 0x2f, 0x61, 0x99, 0x1d, 0xfe, 0x75, 0xe7, 0xdd, 0x3e },
+                  nullptr },
+                { "named entity",
+                  { 0x3c, 0x61, 0x3e, 0x26, 0x61, 0xff, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x3b },
+                  nullptr }
+            };
+
+            for (const auto& row : rows)
+            {
+                auto raw = row.bytes;
+                raw.push_back (0);
+
+                // Build the String from the raw bytes so the malformed sequences survive intact
+                const String text { CharPointer_UTF8 (reinterpret_cast<const char*> (raw.data())) };
+                expectEquals ((int) text.getNumBytesAsUTF8(), (int) row.bytes.size(), row.name);
+
+                XmlDocument doc (text);
+                auto parsed = doc.getDocumentElement();
+                const auto* end = text.getCharPointer().getAddress() + row.bytes.size();
+
+                expect (doc.input.getAddress() <= end, row.name);
+                expect (parsed != nullptr || doc.getLastParseError().isNotEmpty(), row.name);
+
+                if (row.expectedError != nullptr)
+                {
+                    expect (parsed == nullptr, row.name);
+                    expectEquals (doc.getLastParseError(), String (row.expectedError));
+                }
+            }
+
+            // Direct pointer check: skipping must stop at the terminator even when a lead byte
+            // advertises more continuation bytes than the string contains.
+            {
+                const char padded[] { 'a', (char) 0xff, 0, 'X', 'X', 'X', 'X', 'X', 'X', 'X' };
+                CharPointer_UTF8 p (padded);
+                p += 5;
+                expect (p.getAddress() == padded + 2);
+                expect (p.isEmpty());
+
+                const char plain[] { 'a', 'b', 'c', 0 };
+                CharPointer_UTF8 q (plain);
+                q += 3;
+                expect (q.getAddress() == plain + 3);
+            }
+        }
+
+        {
             beginTest ("Single-line output with mixed content");
 
             // A text node used to reset the indentation to 0 for the elements after it, which
