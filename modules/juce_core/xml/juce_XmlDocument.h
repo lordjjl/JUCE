@@ -152,6 +152,17 @@ public:
     */
     void setEmptyTextElementsIgnored (bool shouldBeIgnored) noexcept;
 
+    /** Sets a flag to change the treatment of content after the root element.
+
+        If this is false (the default state), then anything after the end of the root element
+        other than whitespace, comments and processing instructions makes the parse fail with
+        a "content after the root element" error. If this is true, that trailing content is
+        ignored instead. This is meant for third-party metadata blobs that can carry stale
+        bytes after the root, for example from an in-place edit that shrank the document.
+        Everything inside the root element stays strictly checked.
+    */
+    void setTrailingContentIgnored (bool shouldBeIgnored) noexcept;
+
     //==============================================================================
     /** A handy static method that parses a file.
         This is a shortcut for creating an XmlDocument object and calling getDocumentElement() on it.
@@ -173,7 +184,7 @@ private:
     bool outOfData = false, errorOccurred = false;
     String lastError, dtdText;
     StringArray tokenisedDTD;
-    bool needToLoadDTD = false, ignoreEmptyTextElements = true;
+    bool needToLoadDTD = false, ignoreEmptyTextElements = true, ignoreTrailingContent = false;
     std::unique_ptr<InputSource> inputSource;
 
     // Parser recursion guards: see the limits in juce_XmlDocument.cpp
@@ -181,8 +192,16 @@ private:
     size_t totalEntityExpansion = 0, totalExternalEntityBytes = 0;
     bool limitExceeded = false;
 
+    // Set once malformed input has been reported, so that the first such error is kept
+    bool strictErrorSet = false;
+
+    // True when the last outer-element probe of a file stopped at the 8 KB probe limit
+    bool probeTruncated = false;
+
     std::unique_ptr<XmlElement> parseDocumentElement (String::CharPointerType, bool outer);
     void setLastError (const String&, bool carryOn);
+    void setFatalError (const String&);
+    bool onlyMetadataRemains();
     void failBecauseLimitExceeded (const String&);
     bool chargeEntityExpansion (size_t numChars);
     bool parseHeader();

@@ -80,6 +80,11 @@ void XmlDocument::setEmptyTextElementsIgnored (bool shouldBeIgnored) noexcept
     ignoreEmptyTextElements = shouldBeIgnored;
 }
 
+void XmlDocument::setTrailingContentIgnored (bool shouldBeIgnored) noexcept
+{
+    ignoreTrailingContent = shouldBeIgnored;
+}
+
 namespace XmlIdentifierChars
 {
     static bool isIdentifierCharSlow (juce_wchar c) noexcept
@@ -119,8 +124,40 @@ namespace XmlIdentifierChars
     }
 }
 
+// A NUL byte (or, for UTF-16 input, a NUL code unit) followed by anything other than more
+// NULs would silently truncate the text the parser sees. Pure trailing NUL padding is fine.
+static bool inputHasEmbeddedNull (const MemoryOutputStream& data)
+{
+    const auto size = data.getDataSize();
+
+    if (size == 0)
+        return false;
+
+    const auto* bytes = static_cast<const uint8*> (data.getData());
+    const auto isUTF16 = size >= 2 && (CharPointer_UTF16::isByteOrderMarkBigEndian (bytes)
+                                        || CharPointer_UTF16::isByteOrderMarkLittleEndian (bytes));
+    const size_t unitSize = isUTF16 ? 2 : 1;
+    auto i = isUTF16 ? (size_t) 2 : (size_t) 0;
+
+    for (; i + unitSize <= size; i += unitSize)
+        if (bytes[i] == 0 && (unitSize == 1 || bytes[i + 1] == 0))
+            break;
+
+    if (i + unitSize > size)
+        return false;
+
+    for (; i < size; ++i)
+        if (bytes[i] != 0)
+            return true;
+
+    return false;
+}
+
 std::unique_ptr<XmlElement> XmlDocument::getDocumentElement (const bool onlyReadOuterDocumentElement)
 {
+    probeTruncated = false;
+
+    // Note: the outer-element probe is deliberately not cached, so a tag-matched full parse reads the stream twice.
     if (originalText.isEmpty() && inputSource != nullptr)
     {
         std::unique_ptr<InputStream> in (inputSource->createInputStream());
@@ -129,6 +166,18 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElement (const bool onlyRead
         {
             MemoryOutputStream data;
             data.writeFromInputStream (*in, onlyReadOuterDocumentElement ? 8192 : -1);
+            probeTruncated = onlyReadOuterDocumentElement && data.getDataSize() >= 8192;
+
+            if (inputHasEmbeddedNull (data))
+            {
+                // leave the same fresh state a parse starts from
+                outOfData = false;
+                limitExceeded = false;
+                strictErrorSet = false;
+                lastError = "embedded null in input";
+                errorOccurred = true;
+                return {};
+            }
 
            #if JUCE_STRING_UTF_TYPE == 8
             if (data.getDataSize() > 2)
@@ -139,7 +188,14 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElement (const bool onlyRead
                 if (CharPointer_UTF16::isByteOrderMarkBigEndian (text)
                       || CharPointer_UTF16::isByteOrderMarkLittleEndian (text))
                 {
-                    originalText = data.toString();
+                    auto decoded = data.toString();
+
+                    // A truncated outer-element probe must never be cached as the document text,
+                    // or a following full parse would silently parse only the prefix.
+                    if (onlyReadOuterDocumentElement)
+                        return parseDocumentElement (decoded.getCharPointer(), true);
+
+                    originalText = decoded;
                 }
                 else
                 {
@@ -151,7 +207,12 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElement (const bool onlyRead
                 }
             }
            #else
-            originalText = data.toString();
+            auto decoded = data.toString();
+
+            if (onlyReadOuterDocumentElement)
+                return parseDocumentElement (decoded.getCharPointer(), true);
+
+            originalText = decoded;
            #endif
         }
     }
@@ -161,9 +222,23 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElement (const bool onlyRead
 
 std::unique_ptr<XmlElement> XmlDocument::getDocumentElementIfTagMatches (StringRef requiredTag)
 {
-    if (auto xml = getDocumentElement (true))
-        if (xml->hasTagName (requiredTag))
-            return getDocumentElement (false);
+    // The probe result is deliberately not cached (see getDocumentElement): a match costs a second read of the stream.
+    auto xml = getDocumentElement (true);
+
+    // When the probe saw only a prefix of a large file and ran out of input inside the root start
+    // tag (or could not read it), its answer is unreliable, so decide on the complete document.
+    if (probeTruncated && (xml == nullptr || outOfData))
+    {
+        xml = getDocumentElement (false);
+
+        if (xml != nullptr && xml->hasTagName (requiredTag))
+            return xml;
+
+        return {};
+    }
+
+    if (xml != nullptr && xml->hasTagName (requiredTag))
+        return getDocumentElement (false);
 
     return {};
 }
@@ -281,12 +356,24 @@ const String& XmlDocument::getLastParseError() const noexcept
 
 void XmlDocument::setLastError (const String& desc, const bool carryOn)
 {
-    // once a limit has been exceeded the parse has failed, so keep that error
-    if (limitExceeded)
+    // once a limit has been exceeded, or a malformed-input error has been reported, the
+    // parse has failed, so keep that first error
+    if (limitExceeded || strictErrorSet)
         return;
 
     lastError = desc;
     errorOccurred = ! carryOn;
+}
+
+void XmlDocument::setFatalError (const String& desc)
+{
+    setLastError (desc, false);
+
+    if (! limitExceeded)
+    {
+        strictErrorSet = true;
+        outOfData = true;
+    }
 }
 
 bool XmlDocument::chargeEntityExpansion (size_t numChars)
@@ -361,6 +448,7 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
     dtdText.clear();
     tokenisedDTD.clear();
     errorOccurred = false;
+    strictErrorSet = false;
     outOfData = false;
     needToLoadDTD = true;
     elementNestingDepth = 0;
@@ -369,28 +457,81 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
     totalExternalEntityBytes = 0;
     limitExceeded = false;
 
+    // a strict error recorded while scanning (e.g. an unterminated comment) must not be replaced
     if (textToParse.isEmpty())
     {
         lastError = "not enough input";
     }
     else if (! parseHeader())
     {
-        lastError = "malformed header";
+        if (! strictErrorSet)
+            lastError = "malformed header";
     }
     else if (! parseDTD())
     {
-        lastError = "malformed DTD";
+        if (! strictErrorSet)
+            lastError = "malformed DTD";
     }
     else
     {
-        lastError.clear();
+        if (! strictErrorSet)
+            lastError.clear();
+
         std::unique_ptr<XmlElement> result (readNextElement (! onlyReadOuterDocumentElement));
+
+        // after the root element only whitespace, comments and processing instructions may follow
+        if (result != nullptr && ! onlyReadOuterDocumentElement && ! ignoreTrailingContent
+              && ! errorOccurred && ! limitExceeded && ! onlyMetadataRemains())
+            setFatalError ("content after the root element");
 
         if (! errorOccurred && ! limitExceeded)
             return result;
     }
 
     return {};
+}
+
+// This scans by hand rather than reusing skipNextWhiteSpace(), because that reports an unterminated
+// comment or PI with its own error, and anything unterminated after the root must be reported
+// as "content after the root element".
+bool XmlDocument::onlyMetadataRemains()
+{
+    for (;;)
+    {
+        input.incrementToEndOfWhitespace();
+
+        if (input.isEmpty())
+            return true;
+
+        if (*input != '<')
+            return false;
+
+        if (input[1] == '!' && input[2] == '-' && input[3] == '-')
+        {
+            input += 4;
+            auto closeComment = input.indexOf (CharPointer_ASCII ("-->"));
+
+            if (closeComment < 0)
+                return false;
+
+            input += closeComment + 3;
+            continue;
+        }
+
+        if (input[1] == '?')
+        {
+            input += 2;
+            auto closeBracket = input.indexOf (CharPointer_ASCII ("?>"));
+
+            if (closeBracket < 0)
+                return false;
+
+            input += closeBracket + 2;
+            continue;
+        }
+
+        return false;
+    }
 }
 
 bool XmlDocument::parseHeader()
@@ -478,7 +619,7 @@ void XmlDocument::skipNextWhiteSpace()
 
                 if (closeComment < 0)
                 {
-                    outOfData = true;
+                    setFatalError ("unterminated comment");
                     break;
                 }
 
@@ -493,7 +634,7 @@ void XmlDocument::skipNextWhiteSpace()
 
                 if (closeBracket < 0)
                 {
-                    outOfData = true;
+                    setFatalError ("unterminated processing instruction");
                     break;
                 }
 
@@ -606,6 +747,7 @@ XmlElement* XmlDocument::readNextElement (const bool alsoParseSubElements)
         if (endOfToken == input)
         {
             // no tag name - but allow for a gap after the '<' before giving an error
+            // (deliberately lenient: "< a>" is still accepted, while "</ a>" is a malformed end tag)
             skipNextWhiteSpace();
             endOfToken = XmlIdentifierChars::findEndOfToken (input);
 
@@ -621,7 +763,7 @@ XmlElement* XmlDocument::readNextElement (const bool alsoParseSubElements)
         LinkedListPointer<XmlElement::XmlAttributeNode>::Appender attributeAppender (node->attributes);
 
         // A fatal expansion limit must not allocate any more attributes.
-        while (! limitExceeded)
+        while (! limitExceeded && ! strictErrorSet)
         {
             skipNextWhiteSpace();
             auto c = *input;
@@ -667,6 +809,8 @@ XmlElement* XmlDocument::readNextElement (const bool alsoParseSubElements)
                             attributeAppender.append (newAtt);
                             continue;
                         }
+
+                        setFatalError ("unquoted attribute value");
                     }
                     else
                     {
@@ -710,11 +854,33 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
             if (c1 == '/')
             {
-                // our close tag..
-                auto closeTag = input.indexOf ((juce_wchar) '>');
+                // our close tag: "</" name optional-whitespace ">", and the name must be ours
+                input += 2;
+                const auto nameStart = input;
+                const auto nameEnd = XmlIdentifierChars::findEndOfToken (nameStart);
+                input = nameEnd;
+                input.incrementToEndOfWhitespace();
 
-                if (closeTag >= 0)
-                    input += closeTag + 1;
+                if (nameEnd == nameStart || *input != '>')
+                {
+                    setFatalError ("malformed end tag");
+                    break;
+                }
+
+                ++input;
+
+                // compare in place: this is the hot path for large documents
+                auto expectedName = parent.getTagName().getCharPointer();
+                auto closingName = nameStart;
+
+                while (closingName < nameEnd && ! expectedName.isEmpty() && *closingName == *expectedName)
+                {
+                    ++closingName;
+                    ++expectedName;
+                }
+
+                if (closingName < nameEnd || ! expectedName.isEmpty())
+                    setFatalError ("mismatched end tag");
 
                 break;
             }
@@ -762,7 +928,7 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
             for (;;)
             {
-                if (limitExceeded)
+                if (limitExceeded || strictErrorSet)
                     return;
 
                 auto c = *input;
@@ -776,8 +942,7 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
                         if (closeComment < 0)
                         {
-                            setLastError ("unterminated comment", false);
-                            outOfData = true;
+                            setFatalError ("unterminated comment");
                             return;
                         }
 
@@ -795,8 +960,7 @@ void XmlDocument::readChildElements (XmlElement& parent)
 
                         if (closePI < 0)
                         {
-                            setLastError ("unterminated processing instruction", false);
-                            outOfData = true;
+                            setFatalError ("unterminated processing instruction");
                             return;
                         }
 
@@ -831,7 +995,7 @@ void XmlDocument::readChildElements (XmlElement& parent)
                             childAppender.append (n);
 
                         input = oldInput;
-                        outOfData = oldOutOfData || limitExceeded;
+                        outOfData = oldOutOfData || limitExceeded || strictErrorSet;
                     }
                     else
                     {
@@ -921,7 +1085,8 @@ void XmlDocument::readEntity (String& result)
         if (*input == 'x' || *input == 'X')
         {
             ++input;
-            int numChars = 0;
+            int numChars = 0;     // significant digits: leading zeros are valid and do not count
+            bool sawDigit = false;
 
             while (input[0] != ';')
             {
@@ -933,14 +1098,28 @@ void XmlDocument::readEntity (String& result)
 
                 auto hexValue = CharacterFunctions::getHexDigitValue (input[0]);
 
-                if (hexValue < 0 || ++numChars > 8)
+                if (hexValue < 0)
                 {
-                    setLastError ("illegal escape sequence", true);
-                    break;
+                    setFatalError ("malformed character reference");
+                    return;
+                }
+
+                sawDigit = true;
+
+                if ((charCode != 0 || hexValue != 0) && ++numChars > 8)
+                {
+                    setFatalError ("malformed character reference");
+                    return;
                 }
 
                 charCode = (charCode << 4) | hexValue;
                 ++input;
+            }
+
+            if (! sawDigit)
+            {
+                setFatalError ("malformed character reference");
+                return;
             }
 
             ++input;
@@ -962,10 +1141,17 @@ void XmlDocument::readEntity (String& result)
                 if (firstChar == ';')
                     break;
 
-                if (++numChars > 12)
+                if (firstChar < '0' || firstChar > '9')
                 {
-                    setLastError ("illegal escape sequence", true);
-                    break;
+                    setFatalError ("malformed character reference");
+                    return;
+                }
+
+                // leading zeros are valid and do not count towards the digit limit
+                if ((charCode != 0 || firstChar != '0') && ++numChars > 12)
+                {
+                    setFatalError ("malformed character reference");
+                    return;
                 }
 
                 charCode = charCode * 10 + ((int) firstChar - '0');
@@ -976,7 +1162,12 @@ void XmlDocument::readEntity (String& result)
         }
         else
         {
-            setLastError ("illegal escape sequence", true);
+            // "&#" with no digits at all; running off the end of the input is reported by the callers
+            if (input[0] != 0)
+                setFatalError ("malformed character reference");
+            else
+                setLastError ("illegal escape sequence", true);
+
             result += '&';
             return;
         }
@@ -990,7 +1181,7 @@ void XmlDocument::readEntity (String& result)
 
         if (closingSemiColon < 0)
         {
-            outOfData = true;
+            setFatalError ("unterminated entity reference");
             result += '&';
         }
         else

@@ -952,6 +952,16 @@ namespace WavFileHelpers
     };
 
     //==============================================================================
+    // The iXML and axml chunks come from third-party tools, and an in-place edit that shrank the
+    // document can leave stale bytes after the root element, so trailing content is ignored here.
+    static std::unique_ptr<XmlElement> parseThirdPartyXml (const String& source)
+    {
+        XmlDocument document (source);
+        document.setTrailingContentIgnored (true);
+        return document.getDocumentElement();
+    }
+
+    //==============================================================================
     namespace IXMLChunk
     {
         static const std::unordered_set<String> aswgMetadataKeys
@@ -1043,7 +1053,7 @@ namespace WavFileHelpers
 
         static void addToMetadata (StringMap& destValues, const String& source)
         {
-            if (auto xml = parseXML (source))
+            if (auto xml = parseThirdPartyXml (source))
             {
                 if (xml->hasTagName ("BWFXML"))
                 {
@@ -1107,7 +1117,7 @@ namespace WavFileHelpers
     {
         static void addToMetadata (StringMap& destValues, const String& source)
         {
-            if (auto xml = parseXML (source))
+            if (auto xml = parseThirdPartyXml (source))
             {
                 if (xml->hasTagName ("ebucore:ebuCoreMain"))
                 {
@@ -2268,6 +2278,91 @@ struct WaveAudioFormatTests final : public UnitTest
                 }
 
                 expect (reader->metadataValues.getValue (WavAudioFormat::aswgVersion, "") == "3.01");
+            }
+        }
+
+        {
+            beginTest ("Third-party XML metadata chunks tolerate stale bytes after the root element");
+
+            // A minimal RIFF/WAVE: fmt, one third-party metadata chunk, and a one-sample data chunk
+            const auto makeWav = [] (const char* chunkId, const String& xml)
+            {
+                MemoryOutputStream out;
+                const auto xmlSize = (int) xml.getNumBytesAsUTF8();
+                const auto paddedSize = xmlSize + (xmlSize & 1);
+
+                out.write ("RIFF", 4);
+                out.writeInt (4 + 24 + 8 + paddedSize + 8 + 2);
+                out.write ("WAVE", 4);
+                out.write ("fmt ", 4);
+                out.writeInt (16);
+                out.writeShort (1);
+                out.writeShort (1);
+                out.writeInt (44100);
+                out.writeInt (88200);
+                out.writeShort (2);
+                out.writeShort (16);
+                out.write (chunkId, 4);
+                out.writeInt (xmlSize);
+                out.write (xml.toRawUTF8(), (size_t) xmlSize);
+
+                if (xmlSize & 1)
+                    out.writeByte (0);
+
+                out.write ("data", 4);
+                out.writeInt (2);
+                out.writeShort (0);
+                return out.getMemoryBlock();
+            };
+
+            const auto readValue = [] (const MemoryBlock& block, const char* key)
+            {
+                auto reader = rawToUniquePtr (WavAudioFormat().createReaderFor (new MemoryInputStream (block, false), true));
+                return reader != nullptr ? reader->metadataValues.getValue (key, "") : String ("<no reader>");
+            };
+
+            const String versionKey (WavAudioFormat::aswgVersion), contentKey (WavAudioFormat::aswgContentType);
+            const auto ixml = [&] (const String& rootAttributes)
+            {
+                return "<BWFXML" + rootAttributes + "><" + versionKey + ">3.01</" + versionKey + "><ASWG><"
+                         + contentKey + ">Dialogue</" + contentKey + "></ASWG></BWFXML>";
+            };
+
+            const String staleTail ("</ASWG>leftover</BWFXML>");
+
+            // well-formed chunk, then the same chunk with a stale tail from a shrunk in-place edit
+            for (const auto& xml : { ixml (""), ixml ("") + staleTail })
+            {
+                const auto wav = makeWav ("iXML", xml);
+                expectEquals (readValue (wav, WavAudioFormat::aswgVersion), String ("3.01"), xml);
+                expectEquals (readValue (wav, WavAudioFormat::aswgContentType), String ("Dialogue"), xml);
+            }
+
+            // a genuinely malformed chunk (unquoted attribute) yields no values
+            {
+                const auto wav = makeWav ("iXML", ixml (" a=1") + staleTail);
+                expectEquals (readValue (wav, WavAudioFormat::aswgVersion), String());
+                expectEquals (readValue (wav, WavAudioFormat::aswgContentType), String());
+            }
+
+            const auto axml = [] (const String& rootAttributes)
+            {
+                return "<ebucore:ebuCoreMain" + rootAttributes + "><ebucore:coreMetadata><ebucore:identifier>"
+                         "<dc:identifier>ISRC:AA6Q72000047</dc:identifier></ebucore:identifier>"
+                         "</ebucore:coreMetadata></ebucore:ebuCoreMain>";
+            };
+
+            for (const auto& xml : { axml (""), axml ("") + "</ebucore:coreMetadata>leftover</ebucore:ebuCoreMain>" })
+            {
+                const auto wav = makeWav ("axml", xml);
+                expectEquals (readValue (wav, WavAudioFormat::internationalStandardRecordingCode), String ("AA6Q72000047"), xml);
+                expectEquals (readValue (wav, WavAudioFormat::riffInfoSource), String ("AA6Q72000047"), xml);
+            }
+
+            {
+                const auto wav = makeWav ("axml", axml (" a=1") + "leftover");
+                expectEquals (readValue (wav, WavAudioFormat::internationalStandardRecordingCode), String());
+                expectEquals (readValue (wav, WavAudioFormat::riffInfoSource), String());
             }
         }
 

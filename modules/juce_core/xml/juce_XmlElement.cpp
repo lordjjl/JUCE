@@ -1423,8 +1423,10 @@ public:
         {
             beginTest ("Malformed references preserve lenient recovery");
 
-            // Expected text and errors were recorded from HEAD, including its
-            // deliberately lenient decimal and zero-character handling.
+            // Unknown entities and a zero character reference keep recovering as HEAD did.
+            // References with no digits, or a non-digit before the terminator, used to be
+            // accepted and silently changed or dropped content: they now fail the parse
+            // (text == nullptr).
             struct Row
             {
                 const char* reference;
@@ -1432,18 +1434,18 @@ public:
                 const char* error;
             };
 
-            for (const auto& row : { Row { "&#xZ;t", ";t", "illegal escape sequence" },
+            for (const auto& row : { Row { "&#xZ;t", nullptr, "malformed character reference" },
                                     Row { "&bogus;t", "bogust", "unknown entity" },
                                     Row { "&#0;t", "t", "" },
-                                    Row { "&#1Z;t", "4t", "" },
-                                    Row { "&#x;", "", "" } })
+                                    Row { "&#1Z;t", nullptr, "malformed character reference" },
+                                    Row { "&#x;", nullptr, "malformed character reference" } })
             {
                 for (const auto attribute : { false, true })
                 {
                     XmlDocument doc (String (attribute ? "<a v='" : "<a>") + row.reference
                                      + (attribute ? "'/>" : "</a>"));
                     auto parsed = doc.getDocumentElement();
-                    expect (parsed != nullptr);
+                    expect ((parsed != nullptr) == (row.text != nullptr));
 
                     if (parsed != nullptr)
                         expectEquals (attribute ? parsed->getStringAttribute ("v") : parsed->getAllSubText(),
@@ -1471,10 +1473,10 @@ public:
                                  + (recursive ? "&e;" : "&") + suffix);
                 expect (doc.getDocumentElement() == nullptr);
                 expect (doc.outOfData);
-                expectEquals (String (doc.input), recursive ? String (suffix) : String ("='1' y='2'/>"));
+                expectEquals (String (doc.input), String (suffix));
 
                 expectEquals (doc.getLastParseError(), recursive ? String ("entities nested too deeply")
-                                                                : String ("expected '=' after attribute 'bad'"));
+                                                                : String ("unterminated entity reference"));
 
                 XmlDocument accepted ("<a v='x' x='1' y='2'/>");
                 auto parsed = accepted.getDocumentElement();
@@ -1594,7 +1596,7 @@ public:
                   { 0x3c, 0x61, 0x3e, 0x3c, 0x62, 0x3e, 0x3c, 0x63, 0x3e, 0x3c, 0x64, 0x3e, 0x3c, 0x65, 0x3e,
                     0x64, 0x65, 0x65, 0x70, 0x3c, 0x2f, 0x64, 0x3e, 0x3c, 0x2f, 0x63, 0x3e, 0x3c, 0x2f, 0x62,
                     0x3e, 0x3c, 0x2f, 0x61, 0x99, 0x1d, 0xfe, 0x75, 0xe7, 0xdd, 0x3e },
-                  "unmatched tags" },
+                  "mismatched end tag" },
                 { "processing instruction",
                   { 0x3c, 0x72, 0x3e, 0x3c, 0x3f, 0x78, 0x20, 0x63, 0x6f, 0xb7, 0x3e, 0x36, 0xff,
                     0x6d, 0x6d, 0x65, 0x6e, 0x20, 0x3f, 0x3e },
@@ -1733,6 +1735,603 @@ public:
                     auto format = XmlElement::TextFormat().withoutHeader();
                     format.newLineChars = "\n";
                     expectEquals (parsed->toString (format), String ("<a>x<b>\n  <c/>\n</b>\n</a>\n"));
+                }
+            }
+        }
+
+        {
+            const auto expectRejected = [this] (const String& text, const String& error)
+            {
+                XmlDocument doc (text);
+                expect (doc.getDocumentElement() == nullptr, text);
+                expectEquals (doc.getLastParseError(), error, text);
+            };
+
+            // a malformed input paired with its own well-formed neighbour; the neighbour's FULL tree is
+            // checked through its single-line, header-less serialisation
+            const auto expectPair = [this, &expectRejected] (const String& bad, const String& error,
+                                                              const String& good, const String& goodTree)
+            {
+                expectRejected (bad, error);
+                XmlDocument doc (good);
+                auto parsed = doc.getDocumentElement();
+                expect (parsed != nullptr, good);
+                expect (doc.getLastParseError().isEmpty(), good);
+
+                if (parsed != nullptr)
+                    expectEquals (parsed->toString (XmlElement::TextFormat().singleLine().withoutHeader()), goodTree, good);
+            };
+
+            // every malformed input below is paired with its own well-formed neighbour
+            struct Pair { const char* bad; const char* error; const char* good; const char* goodTree; };
+
+            const auto runPairs = [&expectPair] (std::initializer_list<Pair> pairs)
+            {
+                for (const auto& pair : pairs)
+                    expectPair (pair.bad, pair.error, pair.good, pair.goodTree);
+            };
+
+            beginTest ("Unquoted attribute values are rejected");
+
+            runPairs ({ { "<a x=1 y=\"2\"><b/></a>", "unquoted attribute value", "<a x=\"1\" y=\"2\"><b/></a>", "<a x=\"1\" y=\"2\"><b/></a>" },
+                        { "<a x=>",                  "unquoted attribute value", "<a x=\"\"/>",                  "<a x=\"\"/>" },
+                        { "<a x=1/>",                "unquoted attribute value", "<a x=\"1\"/>",                 "<a x=\"1\"/>" },
+                        { "<a y=\"2\" x=1/>",        "unquoted attribute value", "<a y=\"2\" x=\"1\"/>",         "<a y=\"2\" x=\"1\"/>" },
+                        { "<a x= 1/>",               "unquoted attribute value", "<a x= \"1\"/>",                "<a x=\"1\"/>" },
+                        { "<a x=",                   "unquoted attribute value", "<a x=\"1\"/>",                 "<a x=\"1\"/>" } });
+
+            {
+                auto good = XmlDocument::parse ("<a x=\"1\" y='2'><b/></a>");
+                expect (good != nullptr);
+
+                if (good != nullptr)
+                {
+                    expectEquals (good->getStringAttribute ("x"), String ("1"));
+                    expectEquals (good->getStringAttribute ("y"), String ("2"));
+                    expectEquals (good->getNumChildElements(), 1);
+                }
+            }
+
+            beginTest ("Content after the root element is rejected");
+
+            runPairs ({ { "<a/><b>data</b>",               "content after the root element", "<a/><!-- <b>data</b> -->",       "<a/>" },
+                        { "<a/>junk",                      "content after the root element", "<a/> <!-- junk -->",             "<a/>" },
+                        { "<a></a>x",                      "content after the root element", "<a></a>\n",                      "<a/>" },
+                        { "<a/><b/>",                      "content after the root element", "<a/><?b?>",                      "<a/>" },
+                        { "<a/>&amp;",                     "content after the root element", "<a/>\r\n",                       "<a/>" },
+                        { "<a/><!-- unterminated",         "content after the root element", "<a/><!-- terminated -->",        "<a/>" },
+                        { "<a/><?pi unterminated",         "content after the root element", "<a/><?pi terminated?>",          "<a/>" },
+                        { "<a/> <!-- c --> <?p x?> <b/>",  "content after the root element", "<a/> <!-- c --> <?p x?> ",       "<a/>" },
+                        { "<a/>\n<!-- c -->\n</a>",        "content after the root element", "<a/>\n<!-- c -->\n",             "<a/>" } });
+
+            for (const auto* text : { "<a x='1'><b/></a>\n", "<a x='1'><b/></a>\r\n <!-- c --> <?p x?> \n",
+                                      "<?xml version=\"1.0\"?><!-- lead --><a x='1'><b/></a><!-- trail -->" })
+            {
+                XmlDocument doc (text);
+                auto good = doc.getDocumentElement();
+                expect (good != nullptr, text);
+                expect (doc.getLastParseError().isEmpty(), text);
+
+                if (good != nullptr)
+                {
+                    expectEquals (good->getStringAttribute ("x"), String ("1"));
+                    expectEquals (good->getNumChildElements(), 1);
+                }
+            }
+
+            {
+                // The outer-element-only mode never looks past the root start tag
+                XmlDocument outer ("<a/>junk");
+                expect (outer.getDocumentElement (true) != nullptr);
+                expect (outer.getLastParseError().isEmpty());
+            }
+
+            beginTest ("End tags are checked");
+
+            runPairs ({ { "<a></a <b/></a>",   "malformed end tag",  "<a></a>",             "<a/>"     },
+                        { "<a></>",            "malformed end tag",  "<a></a>",             "<a/>"     },
+                        { "<a></a",            "malformed end tag",  "<a></a>",             "<a/>"     },
+                        { "<a></ a>",          "malformed end tag",  "<a></a >",            "<a/>"     },
+                        { "<a></a b>",         "malformed end tag",  "<a></a >",            "<a/>"     },
+                        { "<a><b></a></b>",    "mismatched end tag", "<a><b></b></a>",      "<a><b/></a>"     },
+                        { "<a>text</wrong>",   "mismatched end tag", "<a>text</a>",         "<a>text</a>" },
+                        { "<a x='1'></b>",     "mismatched end tag", "<a x='1'></a>",       "<a x=\"1\"/>"     } });
+
+            for (const auto* text : { "<a>t</a >", "<ns:a>t</ns:a>", "<a>t</a\n>" })
+            {
+                auto good = XmlDocument::parse (text);
+                expect (good != nullptr, text);
+
+                if (good != nullptr)
+                    expectEquals (good->getAllSubText(), String ("t"));
+            }
+
+            beginTest ("Missing terminators are errors");
+
+            runPairs ({ { "<a x=\"&\" y=\"2\"><b/></a>", "unterminated entity reference",        "<a x=\"&amp;\" y=\"2\"><b/></a>", "<a x=\"&amp;\" y=\"2\"><b/></a>"  },
+                        { "<a>&amp</a>",                 "unterminated entity reference",        "<a>&amp;</a>",                    "<a>&amp;</a>" },
+                        { "<a <!-- <b/></a>",            "unterminated comment",                 "<a <!-- <b/> --> ></a>",          "<a/>"  },
+                        { "<a>t<!-- x</a>",              "unterminated comment",                 "<a>t<!-- x --></a>",              "<a>t</a>" },
+                        { "<a><b><!-- x</b></a>",        "unterminated comment",                 "<a><b><!-- x --></b></a>",        "<a><b/></a>"  },
+                        { "<a <? x></a>",                "unterminated processing instruction",  "<a <? x ?>></a>",                 "<a/>"  },
+                        { "<a><?p </a>",                 "unterminated processing instruction",  "<a><?p ?></a>",                   "<a/>"  },
+                        { "<!-- x",                      "unterminated comment",                 "<!-- x --><a/>",                  "<a/>"  } });
+
+            {
+                auto good = XmlDocument::parse ("<a x=\"&amp;\" y=\"2\"><!-- c --><?p x?><b/></a>");
+                expect (good != nullptr);
+
+                if (good != nullptr)
+                {
+                    expectEquals (good->getStringAttribute ("x"), String ("&"));
+                    expectEquals (good->getStringAttribute ("y"), String ("2"));
+                    expectEquals (good->getNumChildElements(), 1);
+                }
+
+                auto commentInTag = XmlDocument::parse ("<a <!-- c --> x=\"1\"/>");
+                expect (commentInTag != nullptr && commentInTag->getStringAttribute ("x") == "1");
+            }
+
+            beginTest ("Malformed character references are errors");
+
+            runPairs ({ { "<a>&#x;</a>",     "malformed character reference", "<a>&#x41;</a>",   "<a>A</a>" },
+                        { "<a>&#xZ;</a>",    "malformed character reference", "<a>&#x5A;</a>",   "<a>Z</a>" },
+                        { "<a>&#1Z;</a>",    "malformed character reference", "<a>&#90;</a>",    "<a>Z</a>" },
+                        { "<a>&#;</a>",      "malformed character reference", "<a>&#59;</a>",    "<a>;</a>" },
+                        { "<a>&#Zq;</a>",    "malformed character reference", "<a>&#90;q</a>",   "<a>Zq</a>" },
+                        { "<a v=\"&#x;\"/>", "malformed character reference", "<a v=\"&#x41;\"/>", "<a v=\"A\"/>" },
+                        { "<a v=\"&#12a;\"/>", "malformed character reference", "<a v=\"&#12;\"/>", "<a v=\"&#12;\"/>" },
+                        { "<a v=\"&#;\"/>",  "malformed character reference", "<a v=\"&#59;\"/>", "<a v=\";\"/>" },
+                        { "<a>&#x4G;</a>",   "malformed character reference", "<a>&#x4F;</a>",   "<a>O</a>" } });
+
+            {
+                // Writers emit numeric references for control characters; they must still parse
+                XmlDocument doc ("<a v='&#65;&#x42;&#x1f;&#31;'>&#65;&#x42;&#1;&#x1F;</a>");
+                auto good = doc.getDocumentElement();
+                expect (good != nullptr);
+                expect (doc.getLastParseError().isEmpty());
+
+                if (good != nullptr)
+                {
+                    expectEquals (good->getStringAttribute ("v"),
+                                  "AB" + String::charToString (0x1f) + String::charToString (0x1f));
+                    expectEquals (good->getAllSubText(),
+                                  "AB" + String::charToString (1) + String::charToString (0x1f));
+                }
+            }
+
+            beginTest ("Over-long character references and sticky errors");
+
+            // more than 8 significant hex / 12 significant decimal digits used to be accepted with a skipped character
+            runPairs ({ { "<a>&#x000000000Z;</a>",      "malformed character reference", "<a>&#x000000041;</a>",     "<a>A</a>" },
+                        { "<a>&#x123456789;</a>",       "malformed character reference", "<a>&#x00000041;</a>",      "<a>A</a>" },
+                        { "<a>&#1234567890123;</a>",    "malformed character reference", "<a>&#000000000065;</a>",   "<a>A</a>" },
+                        { "<a>&#0000000000065Z;</a>",   "malformed character reference", "<a>&#0000000000065;</a>",  "<a>A</a>" },
+                        { "<a v=\"&#x000000000Z;\"/>",   "malformed character reference", "<a v=\"&#x000000041;\"/>",  "<a v=\"A\"/>" },
+                        { "<a v=\"&#1234567890123;\"/>", "malformed character reference", "<a v=\"&#65;\"/>",          "<a v=\"A\"/>" } });
+
+            for (const auto* text : { "<a>&#1;&#31;&#x1F;</a>" })
+            {
+                auto good = XmlDocument::parse (text);
+                expect (good != nullptr, text);
+            }
+
+            // leading zeros are valid XML and do not count towards the digit limit
+            for (const auto* text : { "<a>&#x0000000041;</a>", "<a>&#00000000000065;</a>", "<a v=\"&#x000000000041;\"/>" })
+            {
+                auto good = XmlDocument::parse (text);
+                expect (good != nullptr, text);
+
+                if (good != nullptr)
+                    expectEquals (good->hasAttribute ("v") ? good->getStringAttribute ("v") : good->getAllSubText(), String ("A"));
+            }
+
+            // a recorded error is not replaced by the header / DTD error that follows it
+            runPairs ({ { "<?<?xml",              "unterminated processing instruction", "<?pi?><a/>",                  "<a/>" },
+                        { "<!--<!DOCTYPE a><a/>", "unterminated comment",                "<!-- c --><!DOCTYPE a><a/>",    "<a/>" } });
+
+            {
+                auto good = XmlDocument::parse ("<?pi?><!DOCTYPE a><a/>");
+                expect (good != nullptr);
+            }
+
+            beginTest ("Trailing content can be ignored on request");
+
+            {
+                // strict by default (rejected), tolerant when asked (the real root, exactly); a stale tail that
+                // repeats the old root close must leave the real root intact
+                struct Row { const char* text; const char* root; };
+
+                for (const auto& row : { Row { "<a x='1'><b/></a>leftover</a>", "<a x=\"1\"><b/></a>" },
+                                         Row { "<a x='1'><b/></a></b></a>",     "<a x=\"1\"><b/></a>" },
+                                         Row { "<a x='1'><b/></a>junk",         "<a x=\"1\"><b/></a>" },
+                                         Row { "<a x='1'><b/></a><c/>",         "<a x=\"1\"><b/></a>" },
+                                         Row { "<a x=\"1\"/>junk",              "<a x=\"1\"/>" },
+                                         Row { "<a></a>junk",                   "<a/>" },
+                                         Row { "<a><!-- x --></a>junk",         "<a/>" } })
+                {
+                    expectRejected (row.text, "content after the root element");
+
+                    XmlDocument tolerant (row.text);
+                    tolerant.setTrailingContentIgnored (true);
+                    auto parsed = tolerant.getDocumentElement();
+                    expect (parsed != nullptr, row.text);
+                    expect (tolerant.getLastParseError().isEmpty(), row.text);
+
+                    if (parsed != nullptr)
+                        expectEquals (parsed->toString (XmlElement::TextFormat().singleLine().withoutHeader()),
+                                      String (row.root), row.text);
+                }
+
+                // the opt-in relaxes nothing inside the root element: each malformed input keeps its error
+                // and its own well-formed twin (with the same tail) parses to the exact root
+                struct Strict { const char* bad; const char* error; const char* good; const char* root; };
+
+                for (const auto& row : { Strict { "<a x=1/>junk",           "unquoted attribute value", "<a x=\"1\"/>junk",        "<a x=\"1\"/>" },
+                                         Strict { "<a></b>junk",            "mismatched end tag",       "<a></a>junk",             "<a/>" },
+                                         Strict { "<a><!-- x</a>junk",      "unterminated comment",     "<a><!-- x --></a>junk",   "<a/>" } })
+                {
+                    XmlDocument tolerant (row.bad);
+                    tolerant.setTrailingContentIgnored (true);
+                    expect (tolerant.getDocumentElement() == nullptr, row.bad);
+                    expectEquals (tolerant.getLastParseError(), String (row.error), row.bad);
+
+                    XmlDocument twin (row.good);
+                    twin.setTrailingContentIgnored (true);
+                    auto parsed = twin.getDocumentElement();
+                    expect (parsed != nullptr, row.good);
+
+                    if (parsed != nullptr)
+                        expectEquals (parsed->toString (XmlElement::TextFormat().singleLine().withoutHeader()),
+                                      String (row.root), row.good);
+                }
+
+                XmlDocument unset ("<a/>junk");
+                unset.setTrailingContentIgnored (true);
+                unset.setTrailingContentIgnored (false);
+                expect (unset.getDocumentElement() == nullptr);
+                expectEquals (unset.getLastParseError(), String ("content after the root element"));
+            }
+
+            beginTest ("A document is reusable after an embedded NUL rejection");
+
+            {
+                TemporaryFile badFile (".xml"), goodFile (".xml");
+                const char embedded[] = "<a/>\0<b/>";
+                expect (badFile.getFile().replaceWithData (embedded, sizeof (embedded) - 1));
+                expect (goodFile.getFile().replaceWithData ("<a x='1'><b/></a>", 17));
+
+                XmlDocument doc (badFile.getFile());
+                expect (doc.getDocumentElement() == nullptr);
+                expectEquals (doc.getLastParseError(), String ("embedded null in input"));
+
+                doc.setInputSource (new FileInputSource (goodFile.getFile()));
+                auto good = doc.getDocumentElement();
+                expect (good != nullptr);
+                expect (doc.getLastParseError().isEmpty());
+
+                if (good != nullptr)
+                {
+                    expectEquals (good->getStringAttribute ("x"), String ("1"));
+                    expectEquals (good->getNumChildElements(), 1);
+                }
+            }
+
+            beginTest ("Outer-element probes do not truncate a following full parse");
+
+            for (const auto bigEndian : { false, true })
+            {
+                for (int pad = 0; pad < 12; ++pad)
+                {
+                    // The root start tag is far longer than the 8192-byte probe, so the probe
+                    // ends somewhere inside it; padding moves the cut across every token position.
+                    String text ("<ROOT");
+                    int numAttributes = 1;
+                    text << " first=\"" << String::repeatedString ("v", pad + 1) << "\"";
+
+                    while (text.length() < 6000)
+                    {
+                        text << " a" << numAttributes << "=\"x\"";
+                        ++numAttributes;
+                    }
+
+                    text << "><child n=\"1\"/><child n=\"2\">tail text</child></ROOT>";
+
+                    MemoryOutputStream bytes;
+                    bytes.writeByte (bigEndian ? (char) 0xfe : (char) 0xff);
+                    bytes.writeByte (bigEndian ? (char) 0xff : (char) 0xfe);
+
+                    for (auto p = text.getCharPointer(); ! p.isEmpty();)
+                    {
+                        const auto c = (uint32) p.getAndAdvance();
+                        const auto high = (char) ((c >> 8) & 0xff);
+                        const auto low = (char) (c & 0xff);
+                        bytes.writeByte (bigEndian ? high : low);
+                        bytes.writeByte (bigEndian ? low : high);
+                    }
+
+                    TemporaryFile temp (".xml");
+                    expect (temp.getFile().replaceWithData (bytes.getData(), bytes.getDataSize()));
+                    expect (temp.getFile().getSize() > 8192);
+
+                    const auto label = String (bigEndian ? "BE" : "LE") + " pad " + String (pad);
+
+                    XmlDocument doc (temp.getFile());
+                    auto probed = doc.getDocumentElementIfTagMatches ("ROOT");
+                    auto full = doc.getDocumentElement();
+
+                    for (auto* tree : { probed.get(), full.get() })
+                    {
+                        expect (tree != nullptr, label);
+
+                        if (tree != nullptr)
+                        {
+                            expectEquals (tree->getNumAttributes(), numAttributes, label);
+                            expectEquals (tree->getNumChildElements(), 2, label);
+
+                            expectEquals (tree->getStringAttribute ("first"), String::repeatedString ("v", pad + 1), label);
+
+                            for (int i = 1; i < numAttributes; ++i)
+                                expectEquals (tree->getStringAttribute ("a" + String (i)), String ("x"), label);
+
+                            if (auto* first = tree->getChildElement (0))
+                                expectEquals (first->getStringAttribute ("n"), String ("1"), label);
+
+                            if (auto* second = tree->getChildElement (1))
+                            {
+                                expectEquals (second->getStringAttribute ("n"), String ("2"), label);
+                                expectEquals (second->getAllSubText(), String ("tail text"), label);
+                            }
+                        }
+                    }
+
+                    XmlDocument other (temp.getFile());
+                    expect (other.getDocumentElementIfTagMatches ("OTHER") == nullptr, label);
+                }
+            }
+
+            beginTest ("A short root start tag in a large UTF-16 file parses completely");
+
+            for (const auto bigEndian : { false, true })
+            {
+                String text ("<ROOT kind=\"big\">");
+
+                for (int i = 0; i < 700; ++i)
+                    text << "<item n=\"" << i << "\">text " << i << "</item>";
+
+                text << "</ROOT>";
+
+                MemoryOutputStream bytes;
+                bytes.writeByte (bigEndian ? (char) 0xfe : (char) 0xff);
+                bytes.writeByte (bigEndian ? (char) 0xff : (char) 0xfe);
+
+                for (auto p = text.getCharPointer(); ! p.isEmpty();)
+                {
+                    const auto c = (uint32) p.getAndAdvance();
+                    const auto high = (char) ((c >> 8) & 0xff);
+                    const auto low = (char) (c & 0xff);
+                    bytes.writeByte (bigEndian ? high : low);
+                    bytes.writeByte (bigEndian ? low : high);
+                }
+
+                TemporaryFile temp (".xml");
+                expect (temp.getFile().replaceWithData (bytes.getData(), bytes.getDataSize()));
+                expect (temp.getFile().getSize() > 8192);
+
+                const auto label = String (bigEndian ? "BE" : "LE");
+                XmlDocument doc (temp.getFile());
+                auto probed = doc.getDocumentElementIfTagMatches ("ROOT");
+                auto full = doc.getDocumentElement();
+
+                for (auto* tree : { probed.get(), full.get() })
+                {
+                    expect (tree != nullptr, label);
+
+                    if (tree != nullptr)
+                    {
+                        expectEquals (tree->getStringAttribute ("kind"), String ("big"), label);
+                        expectEquals (tree->getNumChildElements(), 700, label);
+
+                        if (auto* last = tree->getChildElement (699))
+                        {
+                            expectEquals (last->getStringAttribute ("n"), String ("699"), label);
+                            expectEquals (last->getAllSubText(), String ("text 699"), label);
+                        }
+                    }
+                }
+            }
+
+            beginTest ("Embedded NUL bytes are rejected but trailing padding is not");
+
+            const auto parseBytes = [this] (const MemoryBlock& bytes, String& error)
+            {
+                TemporaryFile temp (".xml");
+                expect (temp.getFile().replaceWithData (bytes.getData(), bytes.getSize()));
+                XmlDocument doc (temp.getFile());
+                auto xml = doc.getDocumentElement();
+                error = doc.getLastParseError();
+                return xml;
+            };
+
+            const auto utf16Bytes = [] (std::initializer_list<const char*> parts)
+            {
+                // little-endian with a BOM; an empty part is a single NUL code unit
+                MemoryOutputStream out;
+                out.writeByte ((char) 0xff);
+                out.writeByte ((char) 0xfe);
+
+                for (const auto* part : parts)
+                {
+                    if (*part == 0)
+                    {
+                        out.writeByte (0);
+                        out.writeByte (0);
+                        continue;
+                    }
+
+                    for (const auto* c = part; *c != 0; ++c)
+                    {
+                        out.writeByte (*c);
+                        out.writeByte (0);
+                    }
+                }
+
+                return MemoryBlock (out.getData(), out.getDataSize());
+            };
+
+            {
+                String error;
+                const auto flat = [] (const XmlElement* e)
+                {
+                    return e != nullptr ? e->toString (XmlElement::TextFormat().singleLine().withoutHeader()) : String ("<null>");
+                };
+
+                const auto expectBad = [&] (const MemoryBlock& bytes, const String& label)
+                {
+                    expect (parseBytes (bytes, error) == nullptr, label);
+                    expectEquals (error, String ("embedded null in input"), label);
+                };
+
+                const auto expectGood = [&] (const MemoryBlock& bytes, const String& expected, const String& label)
+                {
+                    auto good = parseBytes (bytes, error);
+                    expectEquals (flat (good.get()), expected, label);
+                    expect (error.isEmpty(), label);
+                };
+
+                // every embedded-NUL input is paired with its own trailing-padding twin
+                const char embedded[] = "<a/>\0<b/>";
+                expectBad (MemoryBlock (embedded, sizeof (embedded) - 1), "utf8 embedded");
+                const char embeddedTwin[] = "<a/>\0\0\0";
+                expectGood (MemoryBlock (embeddedTwin, sizeof (embeddedTwin) - 1), "<a/>", "utf8 embedded twin");
+
+                const char single[] = "<a x='1'/>\0 ";
+                expectBad (MemoryBlock (single, sizeof (single) - 1), "utf8 single");
+                const char singleTwin[] = "<a x='1'/>\0\0";
+                expectGood (MemoryBlock (singleTwin, sizeof (singleTwin) - 1), "<a x=\"1\"/>", "utf8 single twin");
+
+                expectBad (utf16Bytes ({ "<a/>", "", "<b/>" }), "utf16 embedded");
+                expectGood (utf16Bytes ({ "<a/>", "", "" }), "<a/>", "utf16 embedded twin");
+
+                expectGood (utf16Bytes ({ "<a x='1'><b/></a>", "", "", "" }), "<a x=\"1\"><b/></a>", "utf16 padding");
+
+                for (const auto padding : { 1, 3, 16 })
+                {
+                    const String xml ("<a x='1'><b/></a>");
+                    MemoryBlock utf8 (xml.toRawUTF8(), xml.getNumBytesAsUTF8());
+                    utf8.ensureSize (utf8.getSize() + (size_t) padding, true);
+                    expectGood (utf8, "<a x=\"1\"><b/></a>", "utf8 padding " + String (padding));
+                }
+            }
+
+            beginTest ("Writer output round-trips, with and without trailing content");
+
+            std::vector<std::unique_ptr<XmlElement>> originals;
+
+            {
+                auto controls = std::make_unique<XmlElement> ("controls");
+
+                for (int c = 1; c < 0x20; ++c)
+                {
+                    controls->setAttribute (Identifier (String::formatted ("c%02x", c)),
+                                            "p" + String::charToString ((juce_wchar) c) + "q");
+
+                    // a raw carriage return in text is normalised by the parser, so text skips 0x0d
+                    if (c != 0x0d)
+                        controls->createNewChildElement ("t")->addTextElement ("p" + String::charToString ((juce_wchar) c) + "q");
+                }
+
+                originals.push_back (std::move (controls));
+            }
+
+            {
+                auto specials = std::make_unique<XmlElement> ("specials");
+                const auto unicode = String::fromUTF8 ("caf\xc3\xa9 \xe4\xb8\xad\xe6\x96\x87 \xf0\x9f\x98\x80");
+                specials->setAttribute ("punct", "a&b<c>d\"e'f");
+                specials->setAttribute ("unicode", unicode);
+                specials->setAttribute ("empty", "");
+                specials->setAttribute ("multi", "line1\nline2\r\nline3\tx");
+                specials->createNewChildElement ("text")->addTextElement ("x & y < z > \" ' w");
+                specials->createNewChildElement ("unicode")->addTextElement (unicode);
+                specials->createNewChildElement ("empty");
+                originals.push_back (std::move (specials));
+            }
+
+            {
+                auto mixed = std::make_unique<XmlElement> ("mixed");
+                mixed->addTextElement ("lead ");
+                mixed->createNewChildElement ("b")->setAttribute ("n", "1");
+                mixed->addTextElement (" mid ");
+                auto* c = mixed->createNewChildElement ("c");
+                auto* d = c->createNewChildElement ("d");
+                d->addTextElement ("deep");
+                d->createNewChildElement ("e");
+                c->createNewChildElement ("f")->createNewChildElement ("g")->setAttribute ("k", "v");
+                mixed->addTextElement (" tail");
+                originals.push_back (std::move (mixed));
+            }
+
+            originals.push_back (std::make_unique<XmlElement> ("empty"));
+
+            const char* const suffixes[] = { "", "\n", "\r\n  \n", "<!-- c -->", "\n<?pi x?>\n" };
+            int rowNumber = 0;
+
+            for (const auto& original : originals)
+            {
+                std::vector<String> serialised;
+                serialised.push_back (original->toString());
+                serialised.push_back (original->toString (XmlElement::TextFormat().singleLine()));
+                serialised.push_back (original->toString (XmlElement::TextFormat().withoutHeader()));
+
+                {
+                    auto format = XmlElement::TextFormat();
+                    format.newLineChars = "\r\n";
+                    serialised.push_back (original->toString (format));
+                    format.newLineChars = "\n";
+                    serialised.push_back (original->toString (format));
+                    format.lineWrapLength = 5;
+                    serialised.push_back (original->toString (format));
+                }
+
+                JUCE_BEGIN_IGNORE_DEPRECATION_WARNINGS
+                serialised.push_back (original->createDocument (""));
+                JUCE_END_IGNORE_DEPRECATION_WARNINGS
+
+                const auto expected = original->toString();
+
+                for (const auto& text : serialised)
+                {
+                    ++rowNumber;
+
+                    for (const auto* suffix : suffixes)
+                    {
+                        const auto label = original->getTagName() + " #" + String (rowNumber) + " suffix " + String (suffix).replace ("\n", "\\n");
+                        auto parsed = XmlDocument::parse (text + suffix);
+                        expect (parsed != nullptr, label);
+
+                        if (parsed != nullptr)
+                        {
+                            expect (parsed->isEquivalentTo (original.get(), false), label);
+                            expectEquals (parsed->toString(), expected, label);
+                        }
+                    }
+
+                    for (const auto padding : { 1, 3, 16 })
+                    {
+                        const auto label = original->getTagName() + " #" + String (rowNumber) + " NUL padding " + String (padding);
+                        MemoryBlock bytes (text.toRawUTF8(), text.getNumBytesAsUTF8());
+                        bytes.ensureSize (bytes.getSize() + (size_t) padding, true);
+
+                        String error;
+                        auto parsed = parseBytes (bytes, error);
+                        expect (parsed != nullptr, label);
+
+                        if (parsed != nullptr)
+                        {
+                            expect (parsed->isEquivalentTo (original.get(), false), label);
+                            expectEquals (parsed->toString(), expected, label);
+                        }
+                    }
                 }
             }
         }
