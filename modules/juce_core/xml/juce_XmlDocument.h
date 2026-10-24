@@ -121,21 +121,16 @@ public:
     */
     const String& getLastParseError() const noexcept;
 
-    /** The deepest element nesting that the parser accepts. Deeper documents (including
-        nesting produced by entity expansion) fail with a parse error rather than risking
-        a stack overflow.
+    /** The deepest element nesting that the parser accepts. Deeper documents fail with a
+        parse error rather than risking a stack overflow.
     */
     static constexpr int maxElementNestingDepth = 128;
 
-    /** The deepest chain of entities referring to other entities that the parser accepts. */
-    static constexpr int maxEntityNestingDepth = 32;
+    /** Sets an input source object for this document.
 
-    /** Sets an input source object to use for parsing documents that reference external entities.
-
-        If the document has been created from a file, this probably won't be needed, but
-        if you're parsing some text and there might be a DTD that references external
-        files, you may need to create a custom input source that can retrieve the
-        other files it needs.
+        The parser never reads external DTDs or external entities, so this source is not used
+        to resolve them: a document that needs one fails with an "unsupported DTD declaration"
+        error instead. The method is kept for source compatibility.
 
         The object that is passed-in will be deleted automatically when no longer needed.
 
@@ -182,14 +177,17 @@ private:
     String originalText;
     String::CharPointerType input { nullptr };
     bool outOfData = false, errorOccurred = false;
-    String lastError, dtdText;
-    StringArray tokenisedDTD;
-    bool needToLoadDTD = false, ignoreEmptyTextElements = true, ignoreTrailingContent = false;
+    String lastError;
+    bool ignoreEmptyTextElements = true, ignoreTrailingContent = false;
+
+    // The internal DTD subset: simple text entities only (see parseDTD). Anything else is rejected.
+    std::map<String, String> internalEntities;
+    bool doctypeHasExternalId = false;
     std::unique_ptr<InputSource> inputSource;
 
     // Parser recursion guards: see the limits in juce_XmlDocument.cpp
-    int elementNestingDepth = 0, entityNestingDepth = 0;
-    size_t totalEntityExpansion = 0, totalExternalEntityBytes = 0;
+    int elementNestingDepth = 0;
+    size_t totalEntityExpansion = 0;
     bool limitExceeded = false;
 
     // Set once malformed input has been reported, so that the first such error is kept
@@ -213,9 +211,7 @@ private:
     void readQuotedString (String&);
     void readEntity (String&);
 
-    String getFileContents (const String&);
-    String expandEntity (const String&);
-    String expandExternalEntity (const String&);
+    String expandNamedEntity (const String&);
 
    #if JUCE_UNIT_TESTS
     friend class XmlElementTests;

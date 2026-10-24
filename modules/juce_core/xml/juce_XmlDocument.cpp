@@ -244,9 +244,8 @@ std::unique_ptr<XmlElement> XmlDocument::getDocumentElementIfTagMatches (StringR
 }
 
 // Untrusted input must not be able to overflow the stack, so the recursive descent
-// through elements (including elements produced by DTD entity expansion) and through
-// nested entity definitions is bounded (see XmlDocument::maxElementNestingDepth and
-// maxEntityNestingDepth). Legitimate documents nest far below these limits.
+// through elements is bounded (see XmlDocument::maxElementNestingDepth). Legitimate
+// documents nest far below this limit. Entities are plain text and never nest.
 // Measured stack use of a parse of a document nested exactly maxElementNestingDepth (128)
 // deep, arm64 macOS clang: ~119 KB at -O0, ~52 KB at -O1, ~70 KB at -O3. A 256-deep cap
 // was measured at ~222 KB at -O0 and over 400 KB in some optimised builds, which
@@ -280,62 +279,6 @@ namespace
         // Preserve native code units, including non-canonical encodings. Vector growth
         // keeps appends amortized linear, including large attribute values.
         std::vector<String::CharPointerType::CharType> characters;
-    };
-
-    // Rebuild from right to left, just like the old in-place parameter substitution.
-    // Inserted tokens are not re-scanned, but their declarations are visible to earlier
-    // references. Index declarations so repeated unknown references also remain cheap.
-    struct XmlDTDTokenList
-    {
-        explicit XmlDTDTokenList (const StringArray& tokens)
-            : original (tokens), remaining (tokens.size())
-        {
-            for (int i = 2; i < original.size(); ++i)
-                if (original[i - 1] == "%" && original[i - 2].equalsIgnoreCase ("<!entity"))
-                    originalDefinitions.emplace (original[i], i);
-        }
-
-        const String& getToken (int index) const
-        {
-            return index < remaining ? original[index] : reversed[reversed.size() - 1 - (index - remaining)];
-        }
-
-        std::optional<std::pair<String, String>> findParameterEntity (const String& name) const
-        {
-            const auto found = originalDefinitions.find (name);
-
-            // The first original declaration still wins if its value and filename
-            // are entirely within the untouched prefix.
-            if (found != originalDefinitions.end() && found->second + 2 < remaining)
-                return std::make_pair (original[found->second + 1], original[found->second + 2]);
-
-            // Substitution can also form a declaration across the prefix/suffix boundary.
-            for (int i = jmax (2, remaining - 2); i < remaining + 2; ++i)
-                if (getToken (i) == name && getToken (i - 1) == "%"
-                                        && getToken (i - 2).equalsIgnoreCase ("<!entity"))
-                    return std::make_pair (getToken (i + 1), getToken (i + 2));
-
-            const auto expanded = expandedDefinitions.find (name);
-
-            if (expanded != expandedDefinitions.end())
-                return std::make_pair (reversed[expanded->second - 1], reversed[expanded->second - 2]);
-
-            return {};
-        }
-
-        void append (const String& token)
-        {
-            reversed.add (token);
-            const auto size = reversed.size();
-
-            if (size >= 3 && token.equalsIgnoreCase ("<!entity") && reversed[size - 2] == "%")
-                expandedDefinitions[reversed[size - 3]] = size - 3;
-        }
-
-        const StringArray& original;
-        int remaining;
-        StringArray reversed;
-        std::map<String, int> originalDefinitions, expandedDefinitions;
     };
 
     struct ScopedDepthIncrement
@@ -396,37 +339,6 @@ void XmlDocument::failBecauseLimitExceeded (const String& desc)
     outOfData = true;
 }
 
-String XmlDocument::getFileContents (const String& filename)
-{
-    if (inputSource != nullptr)
-    {
-        std::unique_ptr<InputStream> in (inputSource->createInputStreamFor (filename.trim().unquoted()));
-
-        if (in != nullptr)
-        {
-            // Bound both decoded expansion and cumulative input bytes. Separate counters
-            // avoid charging normal external text twice, while counting even zero bytes
-            // that disappear during decoding. Read one extra byte to detect overflow.
-            const auto maxBytes = jmin (4 * (maxTotalEntityExpansion - totalEntityExpansion) + 4,
-                                       maxTotalEntityExpansion - totalExternalEntityBytes);
-            MemoryOutputStream data;
-            data.writeFromInputStream (*in, (int64) maxBytes + 1);
-
-            if (data.getDataSize() > maxBytes)
-            {
-                failBecauseLimitExceeded ("entity expansion too large");
-                return {};
-            }
-
-            totalExternalEntityBytes += data.getDataSize();
-            auto contents = data.toString();
-            return chargeEntityExpansion ((size_t) contents.length()) ? contents : String();
-        }
-    }
-
-    return {};
-}
-
 juce_wchar XmlDocument::readNextChar() noexcept
 {
     auto c = input.getAndAdvance();
@@ -445,16 +357,13 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
 {
     input = textToParse;
     lastError.clear();
-    dtdText.clear();
-    tokenisedDTD.clear();
+    internalEntities.clear();
+    doctypeHasExternalId = false;
     errorOccurred = false;
     strictErrorSet = false;
     outOfData = false;
-    needToLoadDTD = true;
     elementNestingDepth = 0;
-    entityNestingDepth = 0;
     totalEntityExpansion = 0;
-    totalExternalEntityBytes = 0;
     limitExceeded = false;
 
     // a strict error recorded while scanning (e.g. an unterminated comment) must not be replaced
@@ -469,8 +378,7 @@ std::unique_ptr<XmlElement> XmlDocument::parseDocumentElement (String::CharPoint
     }
     else if (! parseDTD())
     {
-        if (! strictErrorSet)
-            lastError = "malformed DTD";
+        // parseDTD has already recorded its (sticky) error
     }
     else
     {
@@ -570,29 +478,360 @@ bool XmlDocument::parseHeader()
     return true;
 }
 
+// The DOCTYPE is read with a real character scanner:
+//   <!DOCTYPE name [ SYSTEM "literal" | PUBLIC "literal" "literal" ] [ '[' subset ']' ] '>'
+// JUCE supports exactly one kind of DTD content, and supports it exactly: internal GENERAL entities whose
+// value is plain text (no markup, and only predefined or numeric character references). ELEMENT and NOTATION
+// declarations and comments are skipped, and an ATTLIST is accepted only if no attribute has a default value
+// (JUCE never applies defaults). Everything else -- parameter entities, external entities, PIs and conditional
+// sections in the subset, entities that refer to entities or contain markup -- fails loudly rather than being
+// silently dropped or reinterpreted. No external DTD or entity is ever read.
 bool XmlDocument::parseDTD()
 {
-    if (CharacterFunctions::compareUpTo (input, CharPointer_ASCII ("<!DOCTYPE"), 9) == 0)
+    if (CharacterFunctions::compareUpTo (input, CharPointer_ASCII ("<!DOCTYPE"), 9) != 0)
+        return true;
+
+    input += 9;
+
+    // XML whitespace only (not JUCE's wider isWhitespace), as the DOCTYPE grammar requires
+    const auto isSpace = [] (juce_wchar c)  { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    const auto skipSpace = [&]              { while (isSpace (*input)) ++input; };
+    const auto malformed = [this]           { setFatalError ("malformed DTD"); return false; };
+    const auto unsupported = [this]         { setFatalError ("unsupported DTD declaration"); return false; };
+    const auto badReference = [this]        { setFatalError ("malformed character reference"); return false; };
+    const auto startsWith = [this] (const char* word)
     {
-        input += 9;
-        auto dtdStart = input;
+        return CharacterFunctions::compareUpTo (input, CharPointer_ASCII (word), (int) strlen (word)) == 0;
+    };
 
-        for (int n = 1; n > 0;)
+    // a quoted literal; false if it is not quoted or never closes
+    const auto readLiteral = [&] (String& text)
+    {
+        const auto quote = *input;
+
+        if (quote != '"' && quote != '\'')
+            return false;
+
+        ++input;
+        const auto start = input;
+
+        while (*input != quote)
         {
-            auto c = readNextChar();
-
-            if (outOfData)
+            if (input.isEmpty())
                 return false;
 
-            if (c == '<')
-                ++n;
-            else if (c == '>')
-                --n;
+            ++input;
         }
 
-        dtdText = String (dtdStart, input - 1).trim();
+        text = String (start, input);
+        ++input;
+        return true;
+    };
+
+    // an entity value with its references decoded; the value must be text only
+    const auto decodeValue = [&] (const String& raw, String& value)
+    {
+        XmlEntityText text;
+        auto p = raw.getCharPointer();
+
+        while (! p.isEmpty())
+        {
+            const auto runStart = p;
+
+            while (! p.isEmpty() && *p != '<' && *p != '&' && *p != '%')
+                ++p;
+
+            text.append (runStart, p);
+
+            if (p.isEmpty())
+                break;
+
+            // markup, and parameter-entity references, are not text
+            if (*p == '<' || *p == '%')
+                return unsupported();
+
+            ++p; // the ampersand
+            const auto bodyStart = p;
+
+            while (! p.isEmpty() && *p != ';' && *p != '&' && *p != '<')
+                ++p;
+
+            const String body (bodyStart, p);
+
+            if (*p != ';')
+                return body.startsWithChar ('#') ? badReference() : unsupported();
+
+            ++p;
+
+            // These names are case-sensitive here (as in XML) although content references are matched
+            // case-insensitively; the stricter rule is intentional so that anything odd fails loudly.
+            if (body == "amp")        { text.append (String::charToString ('&')); continue; }
+            if (body == "lt")         { text.append (String::charToString ('<')); continue; }
+            if (body == "gt")         { text.append (String::charToString ('>')); continue; }
+            if (body == "quot")       { text.append (String::charToString ('"')); continue; }
+            if (body == "apos")       { text.append (String::charToString ('\'')); continue; }
+
+            if (! body.startsWithChar ('#'))
+                return unsupported();   // a reference to another entity (or anything else)
+
+            // the same rules as a numeric reference in the document: digits only, at most 8 significant
+            // hex / 12 significant decimal digits, no range validation
+            const auto isHex = body[1] == 'x' || body[1] == 'X';
+            const auto digits = body.substring (isHex ? 2 : 1);
+            auto valid = digits.isNotEmpty() && digits.trimCharactersAtStart ("0").length() <= (isHex ? 8 : 12);
+            int64_t charCode = 0;
+
+            for (auto d = digits.getCharPointer(); valid && ! d.isEmpty(); ++d)
+            {
+                const auto digit = isHex ? CharacterFunctions::getHexDigitValue (*d)
+                                         : (*d >= '0' && *d <= '9' ? (int) (*d - '0') : -1);
+
+                if (digit < 0)
+                    valid = false;
+                else
+                    charCode = charCode * (isHex ? 16 : 10) + digit;
+            }
+
+            if (! valid)
+                return badReference();
+
+            // XML re-parses character references in a replacement text, so one that yields '<' or '&' would
+            // be markup or a reference in a conforming parser, while here it would be plain text
+            // (checked on the character actually inserted: a huge value narrows to the same juce_wchar)
+            const auto decoded = static_cast<juce_wchar> (charCode);
+
+            if (decoded == '<' || decoded == '&')
+                return unsupported();
+
+            text.append (String::charToString (decoded));
+        }
+
+        value = text.toString();
+        return true;
+    };
+
+    // ELEMENT, NOTATION and ATTLIST: skipped up to the closing '>' (quotes honoured), except that a
+    // parameter-entity reference is unsupported and an ATTLIST must not declare a default value
+    // ELEMENT has no literals; NOTATION may have external ids; only ATTLIST can declare a default value
+    enum class Declaration { element, notation, attlist };
+
+    const auto skipDeclaration = [&] (Declaration kind)
+    {
+        if (! isSpace (*input))
+            return malformed();
+
+        bool declaresDefault = false;
+
+        for (;;)
+        {
+            if (input.isEmpty())
+                return malformed();
+
+            const auto c = *input;
+
+            if (c == '<')
+                return malformed();   // a stray '<' means the declaration was never closed
+
+            if (c == '"' || c == '\'')
+            {
+                String ignored;
+
+                if (kind == Declaration::element || ! readLiteral (ignored))
+                    return malformed();
+
+                declaresDefault = declaresDefault || kind == Declaration::attlist;
+                continue;
+            }
+
+            if (c == '%')
+                return unsupported();
+
+            if (c == '>')
+            {
+                ++input;
+                break;
+            }
+
+            if (c == '#' && kind == Declaration::attlist && startsWith ("#FIXED"))
+                declaresDefault = true;
+
+            ++input;
+        }
+
+        return ! declaresDefault || unsupported();
+    };
+
+    const auto parseEntity = [&]
+    {
+        if (! isSpace (*input))
+            return malformed();
+
+        skipSpace();
+
+        if (*input == '%')
+            return unsupported();
+
+        const auto nameStart = input;
+        const auto nameEnd = XmlIdentifierChars::findEndOfToken (nameStart);
+
+        if (nameEnd == nameStart)
+            return malformed();
+
+        input = nameEnd;
+
+        if (! isSpace (*input))
+            return malformed();
+
+        const String name (nameStart, nameEnd);
+        skipSpace();
+
+        if (*input == '%')
+            return unsupported();   // "<!ENTITY e %p;>"
+
+        String raw;
+
+        if (! readLiteral (raw))
+            return (startsWith ("SYSTEM") || startsWith ("PUBLIC")) ? unsupported() : malformed();
+
+        skipSpace();
+
+        if (*input != '>')
+            return startsWith ("NDATA") ? unsupported() : malformed();
+
+        ++input;
+        String value;
+
+        if (! decodeValue (raw, value))
+            return false;
+
+        // The first declaration of a name wins. Redeclaring a predefined name (amp, lt, gt, quot, apos) is accepted
+        // but never used, because readEntity resolves the predefined names before it looks here.
+        internalEntities.emplace (name, value);
+        return true;
+    };
+
+    // --- the DOCTYPE itself
+    if (! isSpace (*input))
+        return malformed();
+
+    skipSpace();
+    const auto nameEnd = XmlIdentifierChars::findEndOfToken (input);
+
+    if (nameEnd == input)
+        return malformed();
+
+    input = nameEnd;
+    skipSpace();
+
+    if (startsWith ("SYSTEM") || startsWith ("PUBLIC"))
+    {
+        const auto isPublic = startsWith ("PUBLIC");
+        input += 6;
+
+        if (! isSpace (*input))
+            return malformed();
+
+        skipSpace();
+        String literal;
+
+        if (! readLiteral (literal))
+            return malformed();
+
+        if (isPublic)
+        {
+            if (! isSpace (*input))
+                return malformed();
+
+            skipSpace();
+
+            if (! readLiteral (literal))
+                return malformed();
+        }
+
+        doctypeHasExternalId = true;
+        skipSpace();
     }
 
+    if (*input == '[')
+    {
+        ++input;
+
+        for (;;)
+        {
+            skipSpace();
+
+            if (input.isEmpty())
+                return malformed();
+
+            const auto c = *input;
+
+            if (c == ']')
+            {
+                ++input;
+                break;
+            }
+
+            if (c == '%')
+                return unsupported();
+
+            if (c != '<')
+                return malformed();
+
+            if (startsWith ("<!--"))
+            {
+                input += 4;
+                const auto close = input.indexOf (CharPointer_ASCII ("-->"));
+
+                if (close < 0)
+                    return malformed();
+
+                input += close + 3;
+            }
+            else if (startsWith ("<?") || startsWith ("<!["))
+            {
+                return unsupported();
+            }
+            else if (startsWith ("<!ENTITY"))
+            {
+                input += 8;
+
+                if (! parseEntity())
+                    return false;
+            }
+            else if (startsWith ("<!ELEMENT"))
+            {
+                input += 9;
+
+                if (! skipDeclaration (Declaration::element))
+                    return false;
+            }
+            else if (startsWith ("<!NOTATION"))
+            {
+                input += 10;
+
+                if (! skipDeclaration (Declaration::notation))
+                    return false;
+            }
+            else if (startsWith ("<!ATTLIST"))
+            {
+                input += 9;
+
+                if (! skipDeclaration (Declaration::attlist))
+                    return false;
+            }
+            else
+            {
+                return unsupported();
+            }
+        }
+
+        skipSpace();
+    }
+
+    if (*input != '>')
+        return malformed();
+
+    ++input;
     return true;
 }
 
@@ -982,26 +1221,8 @@ void XmlDocument::readChildElements (XmlElement& parent)
                 {
                     String entity;
                     readEntity (entity);
-
-                    if (entity.startsWithChar ('<') && entity [1] != 0)
-                    {
-                        auto oldInput = input;
-                        auto oldOutOfData = outOfData;
-
-                        input = entity.getCharPointer();
-                        outOfData = false;
-
-                        while (auto* n = readNextElement (true))
-                            childAppender.append (n);
-
-                        input = oldInput;
-                        outOfData = oldOutOfData || limitExceeded || strictErrorSet;
-                    }
-                    else
-                    {
-                        textElementContent << entity;
-                        contentShouldBeUsed = contentShouldBeUsed || entity.containsNonWhitespaceChars();
-                    }
+                    textElementContent << entity;
+                    contentShouldBeUsed = contentShouldBeUsed || entity.containsNonWhitespaceChars();
                 }
                 else
                 {
@@ -1187,191 +1408,36 @@ void XmlDocument::readEntity (String& result)
         else
         {
             input += closingSemiColon + 1;
-            result += expandExternalEntity (String (entityNameStart, (size_t) closingSemiColon));
+            result += expandNamedEntity (String (entityNameStart, (size_t) closingSemiColon));
         }
     }
 }
 
-String XmlDocument::expandEntity (const String& ent)
-{
-    if (ent.equalsIgnoreCase ("amp"))   return String::charToString ('&');
-    if (ent.equalsIgnoreCase ("quot"))  return String::charToString ('"');
-    if (ent.equalsIgnoreCase ("apos"))  return String::charToString ('\'');
-    if (ent.equalsIgnoreCase ("lt"))    return String::charToString ('<');
-    if (ent.equalsIgnoreCase ("gt"))    return String::charToString ('>');
-
-    if (ent[0] == '#')
-    {
-        auto char1 = ent[1];
-
-        if (char1 == 'x' || char1 == 'X')
-            return String::charToString (static_cast<juce_wchar> (ent.substring (2).getHexValue32()));
-
-        if (char1 >= '0' && char1 <= '9')
-            return String::charToString (static_cast<juce_wchar> (ent.substring (1).getIntValue()));
-
-        setLastError ("illegal escape sequence", false);
-        return String::charToString ('&');
-    }
-
-    return expandExternalEntity (ent);
-}
-
-String XmlDocument::expandExternalEntity (const String& entity)
+String XmlDocument::expandNamedEntity (const String& entity)
 {
     if (limitExceeded)
         return {};
 
-    ScopedDepthIncrement depthGuard (entityNestingDepth);
+    const auto found = internalEntities.find (entity);
 
-    if (entityNestingDepth > maxEntityNestingDepth)
+    if (found != internalEntities.end())
     {
-        failBecauseLimitExceeded ("entities nested too deeply");
+        // every expansion is charged, so many references to a large value stay bounded
+        if (! chargeEntityExpansion ((size_t) found->second.length()))
+            return {};
+
+        return found->second;
+    }
+
+    // an entity that is not declared here may be declared in an external DTD, which is never read
+    if (doctypeHasExternalId)
+    {
+        setFatalError ("unsupported DTD declaration");
         return {};
     }
 
-    if (needToLoadDTD)
-    {
-        if (dtdText.isNotEmpty())
-        {
-            dtdText = dtdText.trimCharactersAtEnd (">");
-            tokenisedDTD.addTokens (dtdText, true);
-
-            if (tokenisedDTD[tokenisedDTD.size() - 2].equalsIgnoreCase ("system")
-                 && tokenisedDTD[tokenisedDTD.size() - 1].isQuotedString())
-            {
-                auto fn = tokenisedDTD[tokenisedDTD.size() - 1];
-
-                tokenisedDTD.clear();
-                tokenisedDTD.addTokens (getFileContents (fn), true);
-            }
-            else
-            {
-                tokenisedDTD.clear();
-                auto openBracket = dtdText.indexOfChar ('[');
-
-                if (openBracket > 0)
-                {
-                    auto closeBracket = dtdText.lastIndexOfChar (']');
-
-                    if (closeBracket > openBracket)
-                        tokenisedDTD.addTokens (dtdText.substring (openBracket + 1,
-                                                                   closeBracket), true);
-                }
-            }
-
-            XmlDTDTokenList tokens (tokenisedDTD);
-
-            while (tokens.remaining > 0)
-            {
-                const auto& token = tokenisedDTD[tokens.remaining - 1];
-                StringArray replacement;
-
-                if (token.startsWithChar ('%') && token.endsWithChar (';'))
-                {
-                    const auto name = token.substring (1, token.length() - 1);
-                    String parsed;
-
-                    if (const auto declaration = tokens.findParameterEntity (name))
-                    {
-                        if (! chargeEntityExpansion ((size_t) declaration->first.length()))
-                            return {};
-
-                        const auto value = declaration->first.trimCharactersAtEnd (">");
-                        parsed = value.equalsIgnoreCase ("system")
-                                   ? getFileContents (declaration->second.trimCharactersAtEnd (">"))
-                                   : value.trim().unquoted();
-                    }
-                    else
-                    {
-                        if (! chargeEntityExpansion ((size_t) name.length()))
-                            return {};
-
-                        parsed = name;
-                    }
-
-                    if (limitExceeded)
-                        return {};
-
-                    replacement.addTokens (parsed, true);
-                }
-                else
-                {
-                    replacement.add (token);
-                }
-
-                --tokens.remaining;
-
-                for (int i = replacement.size(); --i >= 0;)
-                    tokens.append (replacement[i]);
-            }
-
-            std::reverse (tokens.reversed.begin(), tokens.reversed.end());
-            tokenisedDTD.swapWith (tokens.reversed);
-        }
-
-        needToLoadDTD = false;
-    }
-
-    for (int i = 0; i < tokenisedDTD.size(); ++i)
-    {
-        if (tokenisedDTD[i] == entity)
-        {
-            if (tokenisedDTD[i - 1].equalsIgnoreCase ("<!entity"))
-            {
-                // The raw token is an upper bound for the trimmed, unquoted value, so charge for it
-                // before any of the trimming below allocates
-                if (! chargeEntityExpansion ((size_t) tokenisedDTD [i + 1].length()))
-                    return {};
-
-                auto ent = tokenisedDTD [i + 1].trimCharactersAtEnd (">").trim().unquoted();
-
-                if (! ent.containsChar ('&'))
-                    return ent;
-
-                // Scan the source once and append replacements without copying the prefix.
-                XmlEntityText buffer;
-                auto text = ent.getCharPointer();
-
-                while (! text.isEmpty())
-                {
-                    const auto literalStart = text;
-
-                    while (! text.isEmpty() && *text != '&')
-                        ++text;
-
-                    buffer.append (literalStart, text);
-
-                    if (text.isEmpty())
-                        break;
-
-                    auto ampersand = text++;
-                    auto start = text;
-
-                    while (! text.isEmpty() && *text != ';')
-                        ++text;
-
-                    if (text.isEmpty())
-                    {
-                        setLastError ("entity without terminating semi-colon", false);
-                        buffer.append (ampersand, text);
-                        break;
-                    }
-
-                    auto resolved = expandEntity (String (start, text));
-
-                    if (limitExceeded || ! chargeEntityExpansion ((size_t) resolved.length()))
-                        return {};
-
-                    buffer.append (resolved);
-                    ++text;
-                }
-
-                return buffer.toString();
-            }
-        }
-    }
-
+    // Behaviour change: an unknown name always recovers as TEXT now. Before, a "name" that started with '<'
+    // (malformed input such as "&<b/>;") was re-parsed as markup by the removed entity-markup branch.
     setLastError ("unknown entity", true);
     return entity;
 }

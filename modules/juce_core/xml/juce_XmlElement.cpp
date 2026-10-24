@@ -1066,38 +1066,27 @@ public:
             expect (bomb.getDocumentElement() == nullptr);
             expect (bomb.getLastParseError().isNotEmpty());
 
-            // The same depth reached through an element-producing entity must also be bounded
-            XmlDocument selfReferencing ("<!DOCTYPE a [ <!ENTITY e \"<a>&amp;e;</a>\"> ]><a>&e;</a>");
-            expect (selfReferencing.getDocumentElement() == nullptr);
-            expectEquals (selfReferencing.getLastParseError(), String ("elements nested too deeply"));
+            // Entities are plain text and can neither produce elements nor refer to other entities, so
+            // nesting cannot be reached through them: each of these declarations is rejected
+            for (const auto* dtd : { "<!ENTITY e \"<a>&amp;e;</a>\">", "<!ENTITY e \"<a>&amp;t;</a>\"> <!ENTITY t 'x'>",
+                                    "<!ENTITY e \"xx&e;\">" })
+            {
+                XmlDocument doc (String ("<!DOCTYPE a [ ") + dtd + " ]><a>&e;</a>");
+                expect (doc.getDocumentElement() == nullptr, dtd);
+                expectEquals (doc.getLastParseError(), String ("unsupported DTD declaration"), dtd);
+            }
 
-            XmlDocument finiteMarkup ("<!DOCTYPE a [ <!ENTITY e \"<a>&amp;t;</a>\"> <!ENTITY t 'x'> ]><a>&e;</a>");
-            auto finite = finiteMarkup.getDocumentElement();
-            expect (finite != nullptr && finite->getChildByName ("a") != nullptr && finite->getAllSubText() == "x");
-            expect (finiteMarkup.getLastParseError().isEmpty());
-
-            XmlDocument recursiveText ("<!DOCTYPE a [ <!ENTITY e \"xx&e;\"> ]><a>&e;</a>");
-            expect (recursiveText.getDocumentElement() == nullptr);
-            expect (recursiveText.getLastParseError().isNotEmpty());
-
-            // A chain of N entities, each referring to the previous one, nests N deep
-            const auto entityChain = [] (int length)
+            // A long chain of entities, each referring to the previous one, is rejected at the first link
             {
                 String dtd = " <!ENTITY e0 \"x\"> ";
 
-                for (int i = 1; i < length; ++i)
+                for (int i = 1; i < 200; ++i)
                     dtd << "<!ENTITY e" << i << " \"&e" << (i - 1) << ";\"> ";
 
-                return "<!DOCTYPE a [" + dtd + "]><a>&e" + String (length - 1) + ";</a>";
-            };
-
-            XmlDocument chainAtLimit (entityChain (XmlDocument::maxEntityNestingDepth));
-            expect (chainAtLimit.getDocumentElement() != nullptr);
-            expect (chainAtLimit.getLastParseError().isEmpty());
-
-            XmlDocument chainOverLimit (entityChain (XmlDocument::maxEntityNestingDepth + 1));
-            expect (chainOverLimit.getDocumentElement() == nullptr);
-            expect (chainOverLimit.getLastParseError().isNotEmpty());
+                XmlDocument chain ("<!DOCTYPE a [" + dtd + "]><a>&e199;</a>");
+                expect (chain.getDocumentElement() == nullptr);
+                expectEquals (chain.getLastParseError(), String ("unsupported DTD declaration"));
+            }
 
             // Replacements that keep producing '&' must make progress and finish promptly
             XmlDocument ampersands ("<!DOCTYPE a [ <!ENTITY e \"xx&amp;&amp;&amp;\"> ]><a>&e;</a>");
@@ -1112,183 +1101,7 @@ public:
 
             XmlDocument billionLaughs ("<!DOCTYPE a [" + laughs + "]><a>&l9;</a>");
             expect (billionLaughs.getDocumentElement() == nullptr);
-            expect (billionLaughs.getLastParseError().isNotEmpty());
-        }
-
-        {
-            beginTest ("Parameter entity expansion limits");
-
-            const auto declaration = "<!ENTITY e '" + String::repeatedString ("x", 65536) + "'>";
-
-            for (const auto repetitions : { 64, 96, 128 })
-            {
-                // 96 parameter replacements fit alone, but exceed the shared budget
-                // when the resulting general entity is also expanded 32 times.
-                XmlDocument doc ("<!DOCTYPE a [ <!ENTITY % p \"" + declaration + "\"> "
-                                 + String::repeatedString ("%p; ", repetitions) + "]><a>"
-                                 + String::repeatedString ("&e;", 32) + "</a>");
-                auto parsed = doc.getDocumentElement();
-                expect ((parsed != nullptr) == (repetitions == 64));
-
-                if (parsed != nullptr)
-                {
-                    expectEquals (parsed->getAllSubText(), String::repeatedString ("x", 65536 * 32));
-                    expect (doc.getLastParseError().isEmpty());
-                }
-                else
-                {
-                    expectEquals (doc.getLastParseError(), String ("entity expansion too large"));
-                }
-            }
-
-            // HEAD substitutes parameter tokens once, without recursively expanding
-            // the inserted tokens. Preserve that behaviour for chains and cycles.
-            for (const auto depth : { XmlDocument::maxEntityNestingDepth, XmlDocument::maxEntityNestingDepth + 1 })
-            {
-                String dtd = "<!ENTITY % p0 \"<!ENTITY e 'x'>\"> ";
-
-                for (int i = 1; i < depth; ++i)
-                    dtd << "<!ENTITY % p" << i << " \"%p" << (i - 1) << ";\"> ";
-
-                XmlDocument doc ("<!DOCTYPE a [" + dtd + "%p" + String (depth - 1) + "; ]><a>&e;</a>");
-                auto parsed = doc.getDocumentElement();
-                expect (parsed != nullptr && parsed->getAllSubText() == "e");
-                expectEquals (doc.getLastParseError(), String ("unknown entity"));
-            }
-
-            XmlDocument recursive ("<!DOCTYPE a [ <!ENTITY % p \"%p;\"> %p; ]><a>&e;</a>");
-            auto parsed = recursive.getDocumentElement();
-            expect (parsed != nullptr && parsed->getAllSubText() == "e");
-            expectEquals (recursive.getLastParseError(), String ("unknown entity"));
-        }
-
-        {
-            beginTest ("Large parameter token lists preserve order and single-pass substitution");
-
-            XmlDocument large ("<!DOCTYPE a [ <!ENTITY % p \""
-                               + String::repeatedString ("<!ENTITY e 'x'> ", 8192)
-                               + "<!ENTITY tail 'y'>\"> %p; ]><a>&e;&tail;</a>");
-            auto parsed = large.getDocumentElement();
-            expect (parsed != nullptr && parsed->hasTagName ("a") && parsed->getNumChildElements() == 1);
-
-            if (parsed != nullptr)
-                expectEquals (parsed->getAllSubText(), String ("xy"));
-
-            expect (large.getLastParseError().isEmpty());
-
-            XmlDocument unknown ("<!DOCTYPE a [ " + String::repeatedString ("%a; ", 16384)
-                                 + "<!ENTITY e 'x'> ]><a>&e;</a>");
-            parsed = unknown.getDocumentElement();
-            expect (parsed != nullptr && parsed->getAllSubText() == "x");
-            expect (unknown.getLastParseError().isEmpty());
-
-            // A declaration inserted on the right is visible to references on the left.
-            // Original declarations retain precedence, and newly inserted %refs stay literal.
-            for (const auto& dtd : { String ("<!ENTITY % defs \"<!ENTITY % p 'x'>\"> <!ENTITY e %p; > %defs;"),
-                                    String ("<!ENTITY % p 'x'> <!ENTITY % defs \"<!ENTITY % p 'y'>\"> <!ENTITY e %p; > %defs;"),
-                                    String ("<!ENTITY e %p; > <!ENTITY % %p; 'x'>") })
-            {
-                XmlDocument doc ("<!DOCTYPE a [ " + dtd + " ]><a>&e;</a>");
-                parsed = doc.getDocumentElement();
-                expect (parsed != nullptr && parsed->getAllSubText() == "x");
-                expect (doc.getLastParseError().isEmpty());
-            }
-
-            XmlDocument nested ("<!DOCTYPE a [ <!ENTITY % p '%q;'> <!ENTITY % q \"<!ENTITY e 'x'>\"> %p; ]><a>&e;</a>");
-            parsed = nested.getDocumentElement();
-            expect (parsed != nullptr && parsed->getAllSubText() == "e");
-            expectEquals (nested.getLastParseError(), String ("unknown entity"));
-        }
-
-        {
-            beginTest ("External DTD reads share the expansion budget");
-
-            struct Source final : InputSource
-            {
-                explicit Source (String text)
-                    : contents (std::move (text)), data (contents.toRawUTF8(), contents.getNumBytesAsUTF8())
-                {}
-
-                explicit Source (size_t numBytes) : data (numBytes, true) {}
-
-                InputStream* createInputStream() override { return nullptr; }
-                int64 hashCode() const override             { return 0; }
-
-                InputStream* createInputStreamFor (const String&) override
-                {
-                    struct Stream final : MemoryInputStream
-                    {
-                        explicit Stream (Source& s)
-                            : MemoryInputStream (s.data, false),
-                              source (s)
-                        {}
-
-                        int read (void* dest, int bytes) override
-                        {
-                            const auto count = MemoryInputStream::read (dest, bytes);
-                            source.bytesRead += count;
-                            return count;
-                        }
-
-                        Source& source;
-                    };
-
-                    ++streamsCreated;
-                    return new Stream (*this);
-                }
-
-                String contents;
-                MemoryBlock data;
-                int bytesRead = 0, streamsCreated = 0;
-            };
-
-            for (const auto size : { 1024, 1025, 8192 })
-            {
-                XmlDocument doc (String{});
-                auto* source = new Source (String::repeatedString ("x", size));
-                doc.setInputSource (source);
-                doc.totalEntityExpansion = 8 * 1024 * 1024 - 1024;
-                const auto contents = doc.getFileContents ("external.dtd");
-                expectEquals (contents, size == 1024 ? source->contents : String());
-                expectEquals (doc.getLastParseError(), size == 1024 ? String() : String ("entity expansion too large"));
-                expect (source->bytesRead <= 4 * 1024 + 5);
-            }
-
-            for (const auto parameter : { false, true })
-            {
-                for (const auto overLimit : { false, true })
-                {
-                    XmlDocument doc (parameter ? "<!DOCTYPE a [ <!ENTITY % p SYSTEM 'external.dtd'> %p; ]><a>&e;</a>"
-                                               : "<!DOCTYPE a SYSTEM 'external.dtd'><a>&e;</a>");
-                    doc.setInputSource (new Source ("<!ENTITY e 'x'>"
-                                                    + String::repeatedString (" ", overLimit ? 8 * 1024 * 1024 : 1024)));
-                    auto parsed = doc.getDocumentElement();
-                    expect ((parsed == nullptr) == overLimit);
-                    expectEquals (doc.getLastParseError(), overLimit ? String ("entity expansion too large") : String());
-
-                    if (parsed != nullptr)
-                        expectEquals (parsed->getAllSubText(), String ("x"));
-                }
-            }
-
-            beginTest ("External DTD byte budget includes discarded input");
-
-            XmlDocument discarded ("<!DOCTYPE a [ <!ENTITY % p SYSTEM 'external.dtd'> "
-                                   + String::repeatedString ("%p; ", 4096) + " ]><a>&e;</a>");
-            auto* zeroSource = new Source (size_t (1024 * 1024));
-            discarded.setInputSource (zeroSource);
-            expect (discarded.getDocumentElement() == nullptr);
-            expectEquals (discarded.getLastParseError(), String ("entity expansion too large"));
-            expect (zeroSource->streamsCreated <= 9);
-            expect (zeroSource->bytesRead <= 8 * 1024 * 1024 + 1);
-
-            // Re-parsing resets both budgets, and a small DTD remains acceptable.
-            auto* smallSource = new Source (String ("<!ENTITY e 'x'>"));
-            discarded.setInputSource (smallSource);
-            auto accepted = discarded.getDocumentElement();
-            expect (accepted != nullptr && accepted->getAllSubText() == "x");
-            expect (discarded.getLastParseError().isEmpty());
-            expectEquals (smallSource->streamsCreated, 4096);
+            expectEquals (billionLaughs.getLastParseError(), String ("unsupported DTD declaration"));
         }
 
         {
@@ -1348,19 +1161,13 @@ public:
         }
 
         {
-            beginTest ("Entity buffers preserve recovered replacements");
+            beginTest ("Entity values are decoded once and every expansion is charged");
 
             const auto references = String::repeatedString ("x&amp;", 16384);
             const auto expanded = String::repeatedString ("x&", 16384);
 
             for (const auto complete : { true, false })
             {
-                XmlDocument entityDoc (String{});
-                entityDoc.tokenisedDTD.addTokens ("<!ENTITY e \"" + references + (complete ? "" : "&amp") + "\">", true);
-                const auto entity = entityDoc.expandExternalEntity ("e");
-                expectEquals (entity, complete ? expanded : expanded + "&amp");
-                expectEquals (entityDoc.getLastParseError(), complete ? String() : String ("entity without terminating semi-colon"));
-
                 const auto quoted = "'" + references + (complete ? "'" : "");
                 XmlDocument attributeDoc (String{});
                 attributeDoc.input = quoted.getCharPointer();
@@ -1370,20 +1177,24 @@ public:
                 expectEquals (attributeDoc.getLastParseError(), complete ? String() : String ("unmatched quotes"));
             }
 
+            // one declaration decodes to one million '&'; each reference to it is charged against the
+            // expansion budget, so 8 references fit and 9 do not
+            const auto value = String::repeatedString ("&amp;", 1000000);
+
             for (const auto* prefix : { "<a>", "<a v='" })
             {
-                for (const auto repetitions : { 1000000, 1500000 })
+                for (const auto count : { 8, 9 })
                 {
                     const auto isText = String (prefix) == "<a>";
-                    XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"" + String::repeatedString ("&amp;", repetitions)
-                                     + "\"> ]>" + prefix + "&e;" + (isText ? "</a>" : "'/>"));
+                    XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"" + value + "\"> ]>" + prefix
+                                     + String::repeatedString ("&e;", count) + (isText ? "</a>" : "'/>"));
                     auto parsed = doc.getDocumentElement();
-                    expect ((parsed != nullptr) == (repetitions == 1000000));
+                    expect ((parsed != nullptr) == (count == 8));
 
                     if (parsed != nullptr)
                     {
                         expectEquals (isText ? parsed->getAllSubText() : parsed->getStringAttribute ("v"),
-                                      String::repeatedString ("&", repetitions));
+                                      String::repeatedString ("&", 1000000 * count));
                         expect (doc.getLastParseError().isEmpty());
                     }
                     else
@@ -1455,45 +1266,53 @@ public:
                 }
             }
 
-            // An unknown entity clears a preceding non-limit error in HEAD.
-            XmlDocument recovered ("<!DOCTYPE a [ <!ENTITY e 'x&amp;&amp'> ]><a v='&e;'>&bogus;t</a>");
+            // A declared entity expands while an undeclared name stays lenient: it recovers as text and
+            // leaves a non-fatal "unknown entity" error.
+            XmlDocument recovered ("<!DOCTYPE a [ <!ENTITY e 'x&amp;&amp;'> ]><a v='&e;'>&bogus;t</a>");
             auto parsed = recovered.getDocumentElement();
-            expect (parsed != nullptr && parsed->getStringAttribute ("v") == "x&&amp"
+            expect (parsed != nullptr && parsed->getStringAttribute ("v") == "x&&"
                                       && parsed->getAllSubText() == "bogust");
             expectEquals (recovered.getLastParseError(), String ("unknown entity"));
         }
 
         {
-            beginTest ("Attribute parsing stops after fatal limits");
+            beginTest ("Parsing stops after an expansion-limit failure");
 
-            for (const auto recursive : { true, false })
-            {
-                const auto suffix = recursive ? " x='1' y='2'/>" : "bad x='1' y='2'/>";
-                XmlDocument doc (String ("<!DOCTYPE a [ <!ENTITY e \"&e;\"> ]><a v='")
-                                 + (recursive ? "&e;" : "&") + suffix);
-                expect (doc.getDocumentElement() == nullptr);
-                expect (doc.outOfData);
-                expectEquals (String (doc.input), String (suffix));
+            // nine references to a one-million character value exceed the budget; no later attribute is read
+            const String suffix ("' x='1' y='2'/>");
+            XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"" + String::repeatedString ("&amp;", 1000000) + "\"> ]><a v='"
+                             + String::repeatedString ("&e;", 9) + suffix);
+            expect (doc.getDocumentElement() == nullptr);
+            expect (doc.outOfData);
+            expectEquals (String (doc.input), suffix);
+            expectEquals (doc.getLastParseError(), String ("entity expansion too large"));
+        }
 
-                expectEquals (doc.getLastParseError(), recursive ? String ("entities nested too deeply")
-                                                                : String ("unterminated entity reference"));
+        {
+            beginTest ("Attribute parsing stops after fatal errors");
 
-                XmlDocument accepted ("<a v='x' x='1' y='2'/>");
-                auto parsed = accepted.getDocumentElement();
-                expect (parsed != nullptr && parsed->getNumAttributes() == 3);
-                expect (accepted.getLastParseError().isEmpty());
-            }
+            // an unterminated entity reference is fatal, and no further attribute is allocated
+            const String suffix ("bad x='1' y='2'/>");
+            XmlDocument doc ("<a v='&" + suffix);
+            expect (doc.getDocumentElement() == nullptr);
+            expect (doc.outOfData);
+            expectEquals (String (doc.input), suffix);
+            expectEquals (doc.getLastParseError(), String ("unterminated entity reference"));
+
+            XmlDocument accepted ("<a v='x' x='1' y='2'/>");
+            auto parsed = accepted.getDocumentElement();
+            expect (parsed != nullptr && parsed->getNumAttributes() == 3);
+            expect (accepted.getLastParseError().isEmpty());
         }
 
         {
             beginTest ("DTD state is reset between parses");
 
-            for (const auto loadDTD : { true, false })
             {
                 XmlDocument doc (String{});
                 const auto first = String ("<!DOCTYPE a [ <!ENTITY e 'OLD'> ]>")
                                  + String::repeatedString ("<a>", XmlDocument::maxElementNestingDepth)
-                                 + (loadDTD ? "&e;" : "") + "<a/>"
+                                 + "&e;<a/>"
                                  + String::repeatedString ("</a>", XmlDocument::maxElementNestingDepth);
                 expect (doc.parseDocumentElement (first.getCharPointer(), false) == nullptr);
                 expectEquals (doc.getLastParseError(), String ("elements nested too deeply"));
@@ -1513,14 +1332,13 @@ public:
         {
             beginTest ("Only elements consume the element depth allowance");
 
-            for (const auto* replacement : { "<!--c-->", "<?p?>", "<!--c--> <?p?> ", " " })
+            for (const auto* filler : { "<!--c-->", "<?p?>", "<!--c--> <?p?> ", " " })
             {
                 for (const auto extraElement : { false, true })
                 {
-                    XmlDocument doc ("<!DOCTYPE a [ <!ENTITY e \"<!--leading-->" + String (replacement)
-                                     + (extraElement ? "<b/>" : "") + "\"> ]>"
-                                     + String::repeatedString ("<a>", XmlDocument::maxElementNestingDepth)
-                                     + "&e;" + String::repeatedString ("</a>", XmlDocument::maxElementNestingDepth));
+                    XmlDocument doc (String::repeatedString ("<a>", XmlDocument::maxElementNestingDepth)
+                                     + "<!--leading-->" + filler + (extraElement ? "<b/>" : "")
+                                     + String::repeatedString ("</a>", XmlDocument::maxElementNestingDepth));
                     auto parsed = doc.getDocumentElement();
                     expect ((parsed == nullptr) == extraElement);
                     expectEquals (doc.getLastParseError(), extraElement ? String ("elements nested too deeply") : String());
@@ -1991,6 +1809,285 @@ public:
                 unset.setTrailingContentIgnored (false);
                 expect (unset.getDocumentElement() == nullptr);
                 expectEquals (unset.getLastParseError(), String ("content after the root element"));
+            }
+
+            const auto expectTree = [this] (const String& text, const String& tree)
+            {
+                XmlDocument doc (text);
+                auto parsed = doc.getDocumentElement();
+                expect (parsed != nullptr, text);
+                expect (doc.getLastParseError().isEmpty(), text);
+
+                if (parsed != nullptr)
+                    expectEquals (parsed->toString (XmlElement::TextFormat().singleLine().withoutHeader()), tree, text);
+            };
+
+            beginTest ("DTD R1: the DOCTYPE is read with a real scanner");
+
+            runPairs ({ { "<!DOCTYPE a [><a/>",                       "malformed DTD", "<!DOCTYPE a []><a/>",                        "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x>]><a/>",        "malformed DTD", "<!DOCTYPE a [<!ENTITY e \"x\">]><a/>",        "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e 'x>]><a/>",         "malformed DTD", "<!DOCTYPE a [<!ENTITY e 'x'>]><a/>",          "<a/>" },
+                        { "<!DOCTYPE a [<!-- c ]><a/>",                "malformed DTD", "<!DOCTYPE a [<!-- c -->]><a/>",               "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x\">",            "malformed DTD", "<!DOCTYPE a [<!ENTITY e \"x\">]><a/>",        "<a/>" },
+                        { "<!DOCTYPE a",                               "malformed DTD", "<!DOCTYPE a><a/>",                            "<a/>" },
+                        { "<!DOCTYPE a SYSTEM \"x.dtd",                "malformed DTD", "<!DOCTYPE a SYSTEM \"x.dtd\"><a/>",           "<a/>" },
+                        { "<!DOCTYPE a PUBLIC \"p\"><a/>",             "malformed DTD", "<!DOCTYPE a PUBLIC \"p\" \"s\"><a/>",         "<a/>" },
+                        { "<!DOCTYPEa><a/>",                           "malformed DTD", "<!DOCTYPE a><a/>",                            "<a/>" },
+                        { "<!DOCTYPE a [ junk ]><a/>",                 "malformed DTD", "<!DOCTYPE a [ ]><a/>",                        "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x\"]><a/>",       "malformed DTD", "<!DOCTYPE a [<!ENTITY e \"x\">]><a/>",        "<a/>" } });
+
+            // a '>' in a quoted value or a comment, and an apostrophe in a comment, do not end or derail the DOCTYPE
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"x > y\">]><a>&e;</a>", "<a>x &gt; y</a>");
+            expectTree ("<!DOCTYPE a [<!-- > --><!ENTITY e \"x\">]><a>&e;</a>", "<a>x</a>");
+            expectTree ("<!DOCTYPE a [<!-- it's --><!ENTITY e \"yes\">]><a>&e;</a>", "<a>yes</a>");
+            expectTree ("<!DOCTYPE html><html/>", "<html/>");
+
+            beginTest ("DTD R2: only simple internal text entities are supported");
+
+            runPairs ({ { "<!DOCTYPE a [<!ELEMENT a EMPTY><!ATTLIST a x CDATA \"d\">]><a/>",   "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ELEMENT a EMPTY><!ATTLIST a x CDATA #IMPLIED>]><a x=\"1\"/>", "<a x=\"1\"/>" },
+                        { "<!DOCTYPE a [<!ATTLIST a x CDATA #FIXED \"d\">]><a x=\"d\"/>",       "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ATTLIST a x CDATA #REQUIRED>]><a x=\"d\"/>",          "<a x=\"d\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY % p \"x\"> %p;]><a/>",                        "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY p \"x\">]><a>&p;</a>",                         "<a>x</a>" },
+                        { "<!DOCTYPE a [%p;]><a/>",                                            "unsupported DTD declaration",
+                          "<!DOCTYPE a []><a/>",                                                "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY % d \"<!ATTLIST a x CDATA 'v'>\"> %d;]><a/>",  "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ELEMENT a EMPTY>]><a/>",                              "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY % p SYSTEM \"x.dtd\"> %p;]><a/>",              "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!NOTATION n SYSTEM \"x\">]><a/>",                      "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY % p PUBLIC \"i\" \"x.dtd\"> %p;]><a/>",        "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ELEMENT a (b|c)*>]><a/>",                             "<a/>" },
+                        { "<!DOCTYPE a [<?p <!ENTITY e \"BAD\"> ?> <!ENTITY e \"GOOD\">]><a>&e;</a>", "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"GOOD\">]><a>&e;</a>",                      "<a>GOOD</a>" },
+                        { "<!DOCTYPE a [<![INCLUDE[<!ENTITY e \"x\">]]>]><a/>",                 "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"x\">]><a/>",                               "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e SYSTEM \"e.xml\">]><a>x</a>",                "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"e\">]><a>x</a>",                           "<a>x</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e PUBLIC \"i\" \"e.xml\">]><a v=\"&e;\"/>",    "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"e\">]><a v=\"&e;\"/>",                     "<a v=\"e\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x\" NDATA n>]><a/>",                       "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"x\">]><a/>",                               "<a/>" },
+                        { "<!DOCTYPE a [<!FOO>]><a/>",                                          "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ELEMENT a ANY>]><a/>",                                "<a/>" } });
+
+            // glued declarations, single quotes and ordinary entities in text and attributes
+            expectTree ("<!DOCTYPE a [<!ENTITY t \"text\"><!ENTITY v \"val\">]><a x=\"&v;\">&t;</a>", "<a x=\"val\">text</a>");
+            expectTree ("<!DOCTYPE a [<!ELEMENT a ANY><!ENTITY t 'two words'><!ATTLIST a x CDATA #IMPLIED>]><a x=\"&t;\">&t;</a>",
+                        "<a x=\"two words\">two words</a>");
+
+            beginTest ("DTD R3: an entity value is text only");
+
+            runPairs ({ { "<!DOCTYPE a [<!ENTITY e \"<b/>\">]><a>&e;</a>",                         "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"b\">]><a>&e;</a>",                          "<a>b</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"<b/>lost<c/>\">]><a>&e;</a>",                "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"lost\">]><a>&e;</a>",                       "<a>lost</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"<b/>\">]><a>before&e;after</a>",             "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"-\">]><a>before&e;after</a>",               "<a>before-after</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e2 \"b\"> <!ENTITY e \"a&e2;\">]><a>&e;</a>",    "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e2 \"b\"> <!ENTITY e \"a&amp;e2;\">]><a>&e;</a>", "<a>a&amp;e2;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x&amp\">]><a>&e;</a>",                      "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"x&amp;\">]><a>&e;</a>",                     "<a>x&amp;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"x&foo;\">]><a/>",                          "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"x&apos;\">]><a/>",                          "<a/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#x;\">]><a>&e;</a>",                      "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#x41;\">]><a>&e;</a>",                     "<a>A</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#1Z;\">]><a>&e;</a>",                     "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#65;\">]><a>&e;</a>",                      "<a>A</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#;\">]><a>&e;</a>",                       "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#59;\">]><a>&e;</a>",                      "<a>;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#x123456789;\">]><a>&e;</a>",             "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#x0000000041;\">]><a>&e;</a>",             "<a>A</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#1234567890123;\">]><a v=\"&e;\"/>",      "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#00000000000065;\">]><a v=\"&e;\"/>",      "<a v=\"A\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#12\">]><a/>",                            "malformed character reference",
+                          "<!DOCTYPE a [<!ENTITY e \"&#12;\">]><a/>",                            "<a/>" } });
+
+            // escaped markup stays TEXT, the value is decoded once, quotes of the other kind are plain characters,
+            // an empty value is allowed, and the first declaration of a name wins
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"&lt;b/&gt;\">]><a>&e;</a>", "<a>&lt;b/&gt;</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"&amp;lt;\">]><a>&e;</a>", "<a>&amp;lt;</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e 'say \"hi\"'>]><a>&e;</a>", "<a>say &quot;hi&quot;</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"it's\">]><a>&e;</a>", "<a>it's</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"\">]><a>x&e;y</a>", "<a>xy</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"first\"> <!ENTITY e \"second\">]><a>&e;</a>", "<a>first</a>");
+            expectTree ("<!DOCTYPE a [<!ENTITY e \"m\">]><a>x&e;y</a>", "<a>xmy</a>");
+
+            beginTest ("DTD R3: references that would be markup, and parameter references, are unsupported");
+
+            runPairs ({ { "<!DOCTYPE a [<!ENTITY e \"&#60;b/&gt;\">]><a>&e;</a>",   "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&#62;b/&gt;\">]><a>&e;</a>",    "<a>&gt;b/&gt;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#x3C;b/&gt;\">]><a>&e;</a>",  "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&#x3E;b/&gt;\">]><a>&e;</a>",   "<a>&gt;b/&gt;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#60;\">]><a v=\"&e;\"/>",    "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&#62;\">]><a v=\"&e;\"/>",     "<a v=\"&gt;\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#38;lt;\">]><a>&e;</a>",      "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&amp;lt;\">]><a>&e;</a>",       "<a>&amp;lt;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#x26;\">]><a v=\"&e;\"/>",   "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&amp;\">]><a v=\"&e;\"/>",     "<a v=\"&amp;\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#4294967356;b/&gt;\">]><a>&e;</a>", "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&#4294967358;b/&gt;\">]><a>&e;</a>",   "<a>&gt;b/&gt;</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"&#4294967334;\">]><a v=\"&e;\"/>",   "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"&#4294967335;\">]><a v=\"&e;\"/>",   "<a v=\"'\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e '%p;'>]><a>&e;</a>",                 "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e 'p'>]><a>&e;</a>",                   "<a>p</a>" },
+                        { "<!DOCTYPE a [<!ENTITY e \"a%p;b\">]><a v=\"&e;\"/>",      "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"apb\">]><a v=\"&e;\"/>",        "<a v=\"apb\"/>" },
+                        { "<!DOCTYPE a [<!ENTITY e %p;>]><a/>",                         "unsupported DTD declaration",
+                          "<!DOCTYPE a [<!ENTITY e \"p\">]><a/>",                      "<a/>" },
+                        { "<!DOCTYPE a [<!ELEMENT a (it's)>]><a/>",                     "malformed DTD",
+                          "<!DOCTYPE a [<!ELEMENT a (its)>]><a/>",                      "<a/>" },
+                        { "<!DOCTYPE a [<!ELEMENT a <!ENTITY e 'y' >]><a/>",            "malformed DTD",
+                          "<!DOCTYPE a [<!ELEMENT a ANY>]><a/>",                        "<a/>" },
+                        { "<!DOCTYPE a [<!ATTLIST a x <b CDATA #IMPLIED>]><a/>",        "malformed DTD",
+                          "<!DOCTYPE a [<!ATTLIST a x CDATA #IMPLIED>]><a/>",           "<a/>" } });
+
+            beginTest ("DTD R4: undeclared names and external identifiers");
+
+            runPairs ({ { "<!DOCTYPE a PUBLIC \"p\" \"s\"><a>&e;</a>",                              "unsupported DTD declaration",
+                          "<!DOCTYPE a PUBLIC \"p\" \"s\" [<!ENTITY e \"x\">]><a>&e;</a>",         "<a>x</a>" },
+                        { "<!DOCTYPE a SYSTEM \"x.dtd\"><a v=\"&e;\"/>",                           "unsupported DTD declaration",
+                          "<!DOCTYPE a SYSTEM \"x.dtd\" [<!ENTITY e \"x\">]><a v=\"&e;\"/>",       "<a v=\"x\"/>" } });
+
+            {
+                // without an external identifier an undeclared name keeps JUCE's lenient behaviour
+                XmlDocument lenient ("<!DOCTYPE a><a>&e;</a>");
+                auto parsed = lenient.getDocumentElement();
+                expect (parsed != nullptr && parsed->getAllSubText() == "e");
+                expectEquals (lenient.getLastParseError(), String ("unknown entity"));
+            }
+
+            beginTest ("DTD R5/R6: external DTDs and entities are never read");
+
+            {
+                struct CountingSource final : InputSource
+                {
+                    CountingSource (String t, int& d, int& e) : text (std::move (t)), documentReads (d), externalReads (e) {}
+
+                    InputStream* createInputStream() override
+                    {
+                        ++documentReads;
+                        return new MemoryInputStream (text.toRawUTF8(), text.getNumBytesAsUTF8(), true);
+                    }
+
+                    InputStream* createInputStreamFor (const String&) override   { ++externalReads; return nullptr; }
+                    int64 hashCode() const override                              { return 0; }
+
+                    String text;
+                    int& documentReads;
+                    int& externalReads;
+                };
+
+                const String svg ("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
+                                  "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\"><svg width=\"1\"><rect/></svg>");
+                const String systemDoctype ("<!DOCTYPE a SYSTEM \"x.dtd\"><a/>");
+
+                for (const auto& text : { svg, systemDoctype })
+                {
+                    // from a String the document itself is never read from the source; from a File it is read once
+                    for (const auto fromFile : { false, true })
+                    {
+                        int documentReads = 0, externalReads = 0;
+                        std::unique_ptr<TemporaryFile> temp;
+
+                        if (fromFile)
+                        {
+                            temp = std::make_unique<TemporaryFile> (".xml");
+                            expect (temp->getFile().replaceWithText (text));
+                        }
+
+                        auto doc = fromFile ? std::make_unique<XmlDocument> (temp->getFile())
+                                            : std::make_unique<XmlDocument> (text);
+                        doc->setInputSource (new CountingSource (text, documentReads, externalReads));
+                        auto parsed = doc->getDocumentElement();
+                        expect (parsed != nullptr, text);
+                        expect (doc->getLastParseError().isEmpty(), text);
+                        expectEquals (externalReads, 0, text);
+                        expectEquals (documentReads, fromFile ? 1 : 0, text);
+                    }
+                }
+
+                expectTree (svg, "<svg width=\"1\"><rect/></svg>");
+
+                // Illustrator-style internal subset of simple text entities used in attributes
+                expectTree ("<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
+                            "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [ "
+                            "<!ENTITY ns_svg \"http://www.w3.org/2000/svg\"> "
+                            "<!ENTITY ns_xlink \"http://www.w3.org/1999/xlink\"> ]>"
+                            "<svg xmlns=\"&ns_svg;\" xmlns:xlink=\"&ns_xlink;\"/>",
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"/>");
+
+                // a real file next to the document that declares the entity is not fetched; everything lives in a
+                // unique directory created (and removed) by this test
+                {
+                    struct DirectoryGuard
+                    {
+                        explicit DirectoryGuard (File f) : directory (std::move (f)) {}
+                        ~DirectoryGuard()   { directory.deleteRecursively(); }
+                        File directory;
+                    };
+
+                    const DirectoryGuard guard (File::createTempFile ("juce_xml_dtd_test"));
+                    const auto& directory = guard.directory;
+                    expect (directory.createDirectory().wasOk());
+                    const auto dtdFile = directory.getChildFile ("external.dtd");
+                    const auto docFile = directory.getChildFile ("document.xml");
+                    expect (dtdFile.replaceWithText ("<!ENTITY e 'FROM-FILE'>"));
+                    expect (docFile.replaceWithText ("<!DOCTYPE a SYSTEM \"" + dtdFile.getFileName() + "\"><a>&e;</a>"));
+                    XmlDocument external (docFile);
+                    expect (external.getDocumentElement() == nullptr);
+                    expectEquals (external.getLastParseError(), String ("unsupported DTD declaration"));
+                }
+
+                // the hostile fixtures of the removed parameter-entity / external-read features are rejected at once,
+                // with no hang and no external read
+                {
+                    int documentReads = 0, externalReads = 0;
+                    const auto reject = [&] (const String& text)
+                    {
+                        XmlDocument doc (text);
+                        doc.setInputSource (new CountingSource ("x", documentReads, externalReads));
+                        expect (doc.getDocumentElement() == nullptr);
+                        expectEquals (doc.getLastParseError(), String ("unsupported DTD declaration"));
+                    };
+
+                    reject ("<!DOCTYPE a [ <!ENTITY % p \"<!ENTITY e 'x'>\"> %p; ]><a>&e;</a>");
+                    reject ("<!DOCTYPE a [ <!ENTITY % p SYSTEM 'external.dtd'> " + String::repeatedString ("%p; ", 4096) + " ]><a>&e;</a>");
+                    reject ("<!DOCTYPE a [ " + String::repeatedString ("%a; ", 16384) + "<!ENTITY e 'x'> ]><a>&e;</a>");
+                    reject ("<!DOCTYPE a [ <!ENTITY % p0 \"x\"> <!ENTITY % p1 \"%p0;\"> %p1; ]><a>&e;</a>");
+                    // the original shapes: a 65,536 character parameter value used 64/96/128 times
+                    const auto declaration = "<!ENTITY e '" + String::repeatedString ("x", 65536) + "'>";
+
+                    for (const auto repetitions : { 64, 96, 128 })
+                        reject ("<!DOCTYPE a [ <!ENTITY % p \"" + declaration + "\"> " + String::repeatedString ("%p; ", repetitions)
+                                + "]><a>" + String::repeatedString ("&e;", 32) + "</a>");
+
+                    // long parameter chains (at and over the old depth cap) and a cycle
+                    for (const auto depth : { 32, 33 })
+                    {
+                        String dtd = "<!ENTITY % p0 \"<!ENTITY e 'x'>\"> ";
+
+                        for (int i = 1; i < depth; ++i)
+                            dtd << "<!ENTITY % p" << i << " \"%p" << (i - 1) << ";\"> ";
+
+                        reject ("<!DOCTYPE a [" + dtd + "%p" + String (depth - 1) + "; ]><a>&e;</a>");
+                    }
+
+                    reject ("<!DOCTYPE a [ <!ENTITY % p \"%p;\"> %p; ]><a>&e;</a>");
+
+                    // the 8,192-declaration list delivered through a parameter entity
+                    reject ("<!DOCTYPE a [ <!ENTITY % p \"" + String::repeatedString ("<!ENTITY e 'x'> ", 8192)
+                            + "<!ENTITY tail 'y'>\"> %p; ]><a>&e;&tail;</a>");
+
+                    reject ("<!DOCTYPE a SYSTEM 'external.dtd'><a>&e;</a>");
+                    reject ("<!DOCTYPE a [ <!ENTITY e SYSTEM 'external.dtd'> ]><a>&e;</a>");
+                    expectEquals (externalReads, 0);
+                    expectEquals (documentReads, 0);
+                }
+
+                // many ordinary declarations of one name are cheap, and the first wins
+                expectTree ("<!DOCTYPE a [ " + String::repeatedString ("<!ENTITY e 'x'> ", 8192) + "<!ENTITY tail 'y'> ]><a>&e;&tail;</a>",
+                            "<a>xy</a>");
             }
 
             beginTest ("A document is reusable after an embedded NUL rejection");
