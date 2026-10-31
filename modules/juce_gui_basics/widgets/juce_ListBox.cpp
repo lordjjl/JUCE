@@ -47,6 +47,7 @@ static AccessibilityActions getListRowAccessibilityActions (RowComponentType& ro
     auto onPress = [&rowComponent, onFocus]
     {
         onFocus();
+        const ComponentPeer::ScopedSyntheticKeyDelivery synthetic;
         rowComponent.getOwner().keyPressed (KeyPress (KeyPress::returnKey));
     };
 

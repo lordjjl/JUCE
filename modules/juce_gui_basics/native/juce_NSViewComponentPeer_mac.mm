@@ -910,6 +910,7 @@ public:
                     }
 
                     used |= handleKeyUpOrDown (true);
+                    const detail::NativeKeyScope nativeDelivery ([ev isARepeat]);
                     used |= handleKeyPress (keyCode, textCharacter);
                 }
 

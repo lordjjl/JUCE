@@ -35,6 +35,27 @@
 namespace juce
 {
 
+namespace detail
+{
+
+/** Tracks the native key-down being delivered on this thread. */
+struct NativeKeyScope
+{
+    explicit NativeKeyScope (bool repeatFlag) noexcept;
+    NativeKeyScope() noexcept;
+    ~NativeKeyScope() noexcept;
+
+    static thread_local const NativeKeyScope* top;
+    const NativeKeyScope* const previous;
+    const bool repeat;
+    const bool delivering;
+    mutable bool fresh;
+
+    JUCE_DECLARE_NON_COPYABLE (NativeKeyScope)
+};
+
+} // namespace detail
+
 //==============================================================================
 /**
     The Component class uses a ComponentPeer internally to create and manage a real
@@ -373,6 +394,33 @@ public:
     */
     bool handleKeyPress (const KeyPress& key);
 
+    /** Returns whether the key press being delivered is an auto-repeat.
+
+        Call this from Component::keyPressed() on the message thread. The result is
+        per handleKeyPress(), so one native event that produces several characters
+        reports the same flag for each of them.
+
+        Returns nullopt when no native key-down is being delivered, which includes
+        other threads, keyStateChanged() callbacks, synthetic handleKeyPress() calls,
+        text that an input method consumes before it becomes a key press, and Windows
+        media keys delivered as WM_APPCOMMAND, which carry no repeat information.
+    */
+    static std::optional<bool> isCurrentKeyEventARepeat() noexcept;
+
+    /** Makes isCurrentKeyEventARepeat() return nullopt until this scope is destroyed.
+        Use it when synthesising a key press from inside a native delivery.
+    */
+    struct JUCE_API ScopedSyntheticKeyDelivery
+    {
+        ScopedSyntheticKeyDelivery() noexcept;
+        ~ScopedSyntheticKeyDelivery() noexcept;
+
+    private:
+        const detail::NativeKeyScope* const previous;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedSyntheticKeyDelivery)
+    };
+
     /** Called whenever a key is pressed or released.
         Returns true if the keystroke was used.
     */
@@ -580,6 +628,20 @@ public:
 
 protected:
     //==============================================================================
+    /** Marks the next handleKeyPress() on this thread as a native key-down, so tests
+        can drive a peer without an OS event. For subclasses and test fixtures only.
+    */
+    struct JUCE_API ScopedSimulatedNativeKeyDown
+    {
+        explicit ScopedSimulatedNativeKeyDown (bool isRepeat) noexcept;
+        ~ScopedSimulatedNativeKeyDown() noexcept;
+
+    private:
+        detail::NativeKeyScope nativeScope;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedSimulatedNativeKeyDown)
+    };
+
     static void forceDisplayUpdate();
     void callVBlankListeners (double timestampSec);
 

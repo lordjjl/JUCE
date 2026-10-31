@@ -2181,7 +2181,7 @@ public:
         // can use the plain keystroke event
 
         if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)
-            return peer->doKeyDown (msg.wParam);
+            return peer->doKeyDown (msg.wParam, msg.lParam);
 
         return peer->doKeyUp (msg.wParam);
     }
@@ -3228,7 +3228,7 @@ private:
                 || Component::getCurrentlyModalComponent() != nullptr;
     }
 
-    bool doKeyDown (const WPARAM key)
+    bool doKeyDown (const WPARAM key, const LPARAM flags)
     {
         updateKeyModifiers();
         bool used = false;
@@ -3289,7 +3289,10 @@ private:
             case VK_F23:
             case VK_F24:
                 used = handleKeyUpOrDown (true);
-                used = handleKeyPress (extendedKeyModifier | (int) key, 0) || used;
+                {
+                    const detail::NativeKeyScope nativeDelivery ((flags & (LPARAM (1) << 30)) != 0);
+                    used = handleKeyPress (extendedKeyModifier | (int) key, 0) || used;
+                }
                 break;
 
             default:
@@ -3310,6 +3313,7 @@ private:
                         if (ToUnicode ((UINT) key, scanCode, keyState, text, 8, 0) != 1)
                             text[0] = 0;
 
+                        const detail::NativeKeyScope nativeDelivery ((flags & (LPARAM (1) << 30)) != 0);
                         used = handleKeyPress ((int) LOWORD (keyChar), (juce_wchar) text[0]) || used;
                     }
                 }
@@ -3363,6 +3367,7 @@ private:
                 textChar = 0;
         }
 
+        const detail::NativeKeyScope nativeDelivery ((flags & (LPARAM (1) << 30)) != 0);
         return handleKeyPress (key, textChar);
     }
 
@@ -4135,7 +4140,7 @@ private:
             //==============================================================================
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
-                if (doKeyDown (wParam))
+                if (doKeyDown (wParam, lParam))
                     return 0;
 
                 forwardMessageToParent (message, wParam, lParam);

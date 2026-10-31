@@ -35,6 +35,56 @@
 namespace juce
 {
 
+thread_local const detail::NativeKeyScope* detail::NativeKeyScope::top = nullptr;
+
+detail::NativeKeyScope::NativeKeyScope (bool repeatFlag) noexcept
+    : previous (top), repeat (repeatFlag), delivering (false), fresh (true)
+{
+    static_assert (std::is_trivially_destructible_v<decltype (top)>);
+    top = this;
+}
+
+detail::NativeKeyScope::NativeKeyScope() noexcept
+    : previous (top), repeat (previous != nullptr && previous->repeat),
+      delivering (previous != nullptr && previous->fresh), fresh (false)
+{
+    if (previous != nullptr)
+        previous->fresh = false;
+
+    top = this;
+}
+
+detail::NativeKeyScope::~NativeKeyScope() noexcept
+{
+    top = previous;
+}
+
+std::optional<bool> ComponentPeer::isCurrentKeyEventARepeat() noexcept
+{
+    if (const auto* scope = detail::NativeKeyScope::top; scope != nullptr && scope->delivering)
+        return scope->repeat;
+
+    return std::nullopt;
+}
+
+ComponentPeer::ScopedSyntheticKeyDelivery::ScopedSyntheticKeyDelivery() noexcept
+    : previous (detail::NativeKeyScope::top)
+{
+    detail::NativeKeyScope::top = nullptr;
+}
+
+ComponentPeer::ScopedSyntheticKeyDelivery::~ScopedSyntheticKeyDelivery() noexcept
+{
+    detail::NativeKeyScope::top = previous;
+}
+
+ComponentPeer::ScopedSimulatedNativeKeyDown::ScopedSimulatedNativeKeyDown (bool isRepeat) noexcept
+    : nativeScope (isRepeat)
+{
+}
+
+ComponentPeer::ScopedSimulatedNativeKeyDown::~ScopedSimulatedNativeKeyDown() noexcept = default;
+
 static uint32 lastUniquePeerID = 1;
 
 //==============================================================================
@@ -195,6 +245,8 @@ bool ComponentPeer::handleKeyPress (const int keyCode, const juce_wchar textChar
 
 bool ComponentPeer::handleKeyPress (const KeyPress& keyInfo)
 {
+    const detail::NativeKeyScope delivery;
+
     bool keyWasUsed = false;
 
     for (auto* target = getTargetForKeyPress(); target != nullptr; target = target->getParentComponent())
@@ -234,6 +286,8 @@ bool ComponentPeer::handleKeyPress (const KeyPress& keyInfo)
 
 bool ComponentPeer::handleKeyUpOrDown (const bool isKeyDown)
 {
+    const ScopedSyntheticKeyDelivery noKeyPressInProgress;
+
     bool keyWasUsed = false;
 
     for (auto* target = getTargetForKeyPress(); target != nullptr; target = target->getParentComponent())
