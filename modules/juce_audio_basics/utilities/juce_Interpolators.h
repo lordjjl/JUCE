@@ -78,7 +78,9 @@ private:
 
                 if (i == -numCrossings || (sincPosition >= 0 && lastSincPosition < 0))
                 {
-                    auto indexFloat = (sincPosition >= 0.f ? sincPosition : -sincPosition) * 100.0f;
+                    // The lookup table's zero crossings are 99 entries apart (nonzero up to
+                    // index 9899), so it is read at 99 entries per sample.
+                    auto indexFloat = (sincPosition >= 0.f ? sincPosition : -sincPosition) * 99.0f;
                     auto indexFloored = std::floor (indexFloat);
                     index = (int) indexFloored;
                     firstFrac = indexFloat - indexFloored;
@@ -94,7 +96,7 @@ private:
                     samplePosition = 0;
 
                 lastSincPosition = sincPosition;
-                index += 100 * sign;
+                index += 99 * sign;
             }
 
             return result;
