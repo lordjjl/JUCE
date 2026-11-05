@@ -64,12 +64,26 @@ CFStringRef String::toCFString() const
     return String().toCFString();
 }
 
-String String::convertToPrecomposedUnicode() const
+bool String::tryConvertToPrecomposedUnicode (String& result) const
 {
    #if JUCE_IOS
     JUCE_AUTORELEASEPOOL
     {
-        return nsStringToJuce ([juceStringToNS (*this) precomposedStringWithCanonicalMapping]);
+        if (isEmpty())
+        {
+            result = {};
+            return true;
+        }
+
+        NSString* source = juceStringToNS (*this);
+        NSString* composed = source != nil ? [source precomposedStringWithCanonicalMapping] : nil;
+        if (composed == nil)
+        {
+            result = *this;   // conversion failed: keep the input and report it
+            return false;
+        }
+        result = nsStringToJuce (composed);
+        return true;
     }
    #else
     UnicodeMapping map;
@@ -85,33 +99,69 @@ String String::convertToPrecomposedUnicode() const
     map.mappingVersion = kUnicodeUseLatestMapping;
 
     UnicodeToTextInfo conversionInfo = {};
-    String result;
+    if (isEmpty())
+    {
+        result = {};
+        return true;
+    }
+
+    // Never lose a non-empty name on failure; composition may need a larger buffer.
+    result = *this;
+    bool converted = false;
 
     if (CreateUnicodeToTextInfo (&map, &conversionInfo) == noErr)
     {
         const size_t bytesNeeded = CharPointer_UTF16::getBytesRequiredFor (getCharPointer());
+        const auto utf16 = toUTF16();
 
-        HeapBlock<char> tempOut;
-        tempOut.calloc (bytesNeeded + 4);
+        ByteCount outputCapacity = 3 * bytesNeeded + 4;
 
-        ByteCount bytesRead = 0;
-        ByteCount outputBufferSize = 0;
-
-        if (ConvertFromUnicodeToText (conversionInfo,
-                                      bytesNeeded, (ConstUniCharArrayPtr) toUTF16().getAddress(),
-                                      kUnicodeDefaultDirectionMask,
-                                      0, {}, {}, {},
-                                      bytesNeeded, &bytesRead,
-                                      &outputBufferSize, tempOut) == noErr)
+        for (int attempt = 0; attempt < 3; ++attempt)
         {
-            result = String (CharPointer_UTF16 (reinterpret_cast<CharPointer_UTF16::CharType*> (tempOut.get())));
+            HeapBlock<char> tempOut (outputCapacity);
+            ByteCount bytesRead = 0;
+            ByteCount outputBufferSize = 0;
+
+            const auto status = ConvertFromUnicodeToText (conversionInfo,
+                                                         bytesNeeded, (ConstUniCharArrayPtr) utf16.getAddress(),
+                                                         kUnicodeDefaultDirectionMask,
+                                                         0, {}, {}, {},
+                                                         outputCapacity, &bytesRead,
+                                                         &outputBufferSize, tempOut);
+
+            // Accept only a complete conversion of the whole input into whole UTF-16 units.
+            if (status == noErr && bytesRead == bytesNeeded && (outputBufferSize % 2) == 0
+                && outputBufferSize > 0 && outputBufferSize <= outputCapacity)
+            {
+                const auto* start = reinterpret_cast<const CharPointer_UTF16::CharType*> (tempOut.get());
+                const auto* end = reinterpret_cast<const CharPointer_UTF16::CharType*> (tempOut.get() + outputBufferSize);
+                result = String (CharPointer_UTF16 (start), CharPointer_UTF16 (end));
+                converted = true;
+                break;
+            }
+
+            if (status != kTECOutputBufferFullStatus && status != kTECBufferBelowMinimumSizeErr)
+                break;
+
+            // The converter keeps state from the failed attempt: reset before retrying,
+            // and give up (input kept, false returned) if the reset itself fails.
+            if (ResetUnicodeToTextInfo (conversionInfo) != noErr)
+                break;
+            outputCapacity *= 2;
         }
 
         DisposeUnicodeToTextInfo (&conversionInfo);
     }
 
-    return result;
+    return converted;
    #endif
+}
+
+String String::convertToPrecomposedUnicode() const
+{
+    String result;
+    tryConvertToPrecomposedUnicode (result);
+    return result;
 }
 
 } // namespace juce

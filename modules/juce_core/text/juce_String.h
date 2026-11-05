@@ -1351,8 +1351,15 @@ public:
     CFStringRef toCFString() const;
 
     /** OSX ONLY - Returns a copy of this string in which any decomposed unicode characters have
-        been converted to their precomposed equivalents. */
+        been converted to their precomposed equivalents. If the conversion fails, the string is
+        returned unchanged (never an empty string for a non-empty input). */
     String convertToPrecomposedUnicode() const;
+
+    /** OSX ONLY - Like convertToPrecomposedUnicode(), but reports whether the conversion
+        succeeded. On success @p result holds the precomposed string (empty for an empty input);
+        on failure it holds this string unchanged and the function returns false, so callers
+        that must not accept an unconverted string can fail closed. */
+    bool tryConvertToPrecomposedUnicode (String& result) const;
    #endif
 
     /** Returns the number of String objects which are currently sharing the same internal
