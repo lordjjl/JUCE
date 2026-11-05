@@ -1141,6 +1141,10 @@ public:
         {
             OverlappedEvent over;
 
+            // A dedicated event is required to establish completion of this request.
+            if (over.over.hEvent == nullptr)
+                return connected;
+
             if (ConnectNamedPipe (pipeH, &over.over) == 0)
             {
                 switch (GetLastError())
@@ -1183,6 +1187,10 @@ public:
                 return 0;
 
             OverlappedEvent over;
+
+            if (over.over.hEvent == nullptr)
+                return -1;
+
             unsigned long numRead = 0;
 
             if (ReadFile (pipeH, destBuffer, (DWORD) maxBytesToRead, &numRead, &over.over))
@@ -1216,6 +1224,10 @@ public:
                 return 0;
 
             OverlappedEvent over;
+
+            if (over.over.hEvent == nullptr)
+                return -1;
+
             unsigned long numWritten;
 
             if (WriteFile (pipeH, sourceBuffer, (DWORD) numBytesToWrite, &numWritten, &over.over))
@@ -1254,18 +1266,25 @@ private:
 
         ~OverlappedEvent()
         {
-            CloseHandle (over.hEvent);
+            if (over.hEvent != nullptr)
+                CloseHandle (over.hEvent);
         }
 
         OVERLAPPED over;
     };
 
+    // BATCHY PATCH (2026-11-05): Cancel only this request, then drain its completion.
+    // The drain can extend an individual wait beyond its timeout and is unbounded by
+    // design: stack/caller-owned OVERLAPPED and buffers must remain until completion.
+    // Local named-pipe cancellation is prompt in practice.
+    // https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex
     bool waitForIO (OverlappedEvent& over, int timeOutMilliseconds)
     {
         if (shouldStop)
         {
-            CancelIo (pipeH);
-            return false;
+            CancelIoEx (pipeH, &over.over);
+            DWORD transferred = 0;
+            return GetOverlappedResult (pipeH, &over.over, &transferred, TRUE) != FALSE;
         }
 
         HANDLE handles[] = { over.over.hEvent, cancelEvent };
@@ -1276,8 +1295,9 @@ private:
         if (waitResult == WAIT_OBJECT_0)
             return true;
 
-        CancelIo (pipeH);
-        return false;
+        CancelIoEx (pipeH, &over.over);
+        DWORD transferred = 0;
+        return GetOverlappedResult (pipeH, &over.over, &transferred, TRUE) != FALSE;
     }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Pimpl)
