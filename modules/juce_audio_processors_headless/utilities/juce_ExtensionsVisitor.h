@@ -72,6 +72,9 @@ typedef AudioComponentInstance AudioUnit;
 struct AEffect;
 
 //==============================================================================
+/** Defined when ExtensionsVisitor::VST3Client::isProcessingActive() is available. */
+#define JUCE_VST3_CLIENT_HAS_PROCESSING_ACTIVE 1
+
 namespace juce
 {
 
