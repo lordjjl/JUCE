@@ -72,6 +72,9 @@ typedef AudioComponentInstance AudioUnit;
 struct AEffect;
 
 //==============================================================================
+/** Defined when ExtensionsVisitor::VST3Client::isProcessingActive() is available. */
+#define JUCE_VST3_CLIENT_HAS_PROCESSING_ACTIVE 1
+
 namespace juce
 {
 
@@ -100,6 +103,12 @@ struct ExtensionsVisitor
     {
         virtual ~VST3Client() = default;
         virtual Steinberg::Vst::IComponent* getIComponentPtr() const noexcept = 0;
+
+        /** Returns whether the wrapper successfully enabled processing in prepareToPlay.
+            Query this via AudioPluginInstance::getExtensions() after preparation or release.
+            The default returns true for clients that do not report their activation state.
+        */
+        virtual bool isProcessingActive() const noexcept { return true; }
 
         virtual MemoryBlock getPreset() const = 0;
         virtual bool setPreset (const MemoryBlock&) const = 0;

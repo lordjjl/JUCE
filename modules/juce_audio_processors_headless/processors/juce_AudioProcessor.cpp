@@ -922,7 +922,7 @@ AudioProcessorEditor* AudioProcessor::createEditorIfNeeded()
         activeEditor = ed;
 
     // You must make your hasEditor() method return a consistent result!
-    jassert (hasEditor() == (ed != nullptr));
+    jassert (ed == nullptr || hasEditor());
 
     return ed;
 }

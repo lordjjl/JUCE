@@ -2162,6 +2162,7 @@ public:
         if (isControllerInitialised && ! holder->isIComponentAlsoIEditController())
             editController->terminate();
 
+        // An unusable component is still terminated because nothing safer is possible; bus calls are skipped.
         holder->terminate();
 
         componentConnection = nullptr;
@@ -2231,6 +2232,8 @@ public:
             explicit Extensions (const VST3PluginInstanceHeadless* instanceIn) : instance (instanceIn) {}
 
             Vst::IComponent* getIComponentPtr() const noexcept override   { return instance->holder->component.get(); }
+
+            bool isProcessingActive() const noexcept override { return instance->isActive.load(); }
 
             MemoryBlock getPreset() const override             { return instance->getStateForPresetFile(); }
 
@@ -2310,7 +2313,12 @@ public:
         JUCE_ASSERT_MESSAGE_THREAD
         MessageManagerLock lock;
 
+        // Known upstream limitation: a synchronous restartComponent reentering release/reset
+        // while prepare holds this non-recursive lock is not handled here.
         const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (componentNeedsReplacement.load())
+            return;
 
         // Avoid redundantly calling things like setActive, which can be a heavy-duty call for some plugins:
         if (isActive
@@ -2325,16 +2333,26 @@ public:
         // activation can be updated safely.
         deactivate();
 
+        // Ardour likewise refuses to reconfigure after a failed deactivation.
+        if (componentNeedsReplacement.load())
+            return;
+
         ProcessSetup setup;
         setup.symbolicSampleSize    = isUsingDoublePrecision() ? kSample64 : kSample32;
         setup.maxSamplesPerBlock    = estimatedSamplesPerBlock;
         setup.sampleRate            = newSampleRate;
         setup.processMode           = isNonRealtime() ? kOffline : kRealtime;
 
-        warnOnFailure (processor->setupProcessing (setup));
+        const ScopeGuard cleanup { [&]
+        {
+            if (! isActive)
+                deactivateBusesChecked();
+        } };
 
-        holder->initialise();
+        if (! holder->initialise())
+            return;
 
+        const auto requestedLayouts = getBusesLayout();
         auto inArrangements  = busLayoutsToArrangements (true) .value_or (std::vector<SpeakerArrangement>{});
         auto outArrangements = busLayoutsToArrangements (false).value_or (std::vector<SpeakerArrangement>{});
 
@@ -2343,35 +2361,81 @@ public:
         auto* inData  = inArrangements .empty() ? &nullArrangement : inArrangements .data();
         auto* outData = outArrangements.empty() ? &nullArrangement : outArrangements.data();
 
-        warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
-                                                      outData, static_cast<int32> (outArrangements.size())));
+        const auto arrangementResult = warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
+                                                                                   outData, static_cast<int32> (outArrangements.size())));
 
-        const auto inArrActual  = getActualArrangements (true);
-        const auto outArrActual = getActualArrangements (false);
+        // Refused requests may proceed only if the reported enabled layouts still match.
+        if (arrangementResult != kResultOk && arrangementResult != kResultFalse)
+            return;
 
-        jassert (inArrActual == inArrangements && outArrActual == outArrangements);
+        std::vector<ChannelMapping> inputMappings, outputMappings;
+
+        for (const auto isInput : { true, false })
+        {
+            auto& mappings = isInput ? inputMappings : outputMappings;
+
+            if (holder->component->getBusCount (kAudio, isInput ? kInput : kOutput) != getBusCount (isInput))
+                return;
+
+            for (int i = 0; i < getBusCount (isInput); ++i)
+            {
+                SpeakerArrangement arrangement = {};
+
+                if (processor->getBusArrangement (isInput ? kInput : kOutput, i, arrangement) != kResultOk)
+                    return;
+
+                const auto layout = getChannelSetForSpeakerArrangement (arrangement);
+
+                if (! layout.has_value() || (getBus (isInput, i)->isEnabled() && layout->isDisabled()))
+                    return;
+
+                mappings.emplace_back (*layout, getBus (isInput, i)->isEnabled());
+
+                // Hosts size buffers from the negotiated layout, so a silent width change
+                // at prepare must not reach process().
+                if (getBus (isInput, i)->isEnabled() && *layout != requestedLayouts.getBuses (isInput)[i])
+                    return;
+            }
+        }
+
+        if (warnOnFailure (processor->setupProcessing (setup)) != kResultOk)
+            return;
 
         // Needed for having the same sample rate in processBlock(); some plugins need this!
         setRateAndBufferSizeDetails (newSampleRate, estimatedSamplesPerBlock);
 
-        auto numInputBuses  = getBusCount (true);
-        auto numOutputBuses = getBusCount (false);
+        for (const auto mediaType : { kAudio, kEvent })
+        {
+            for (const auto isInput : { true, false })
+            {
+                const auto direction = isInput ? kInput : kOutput;
+                const auto numBuses = holder->component->getBusCount (mediaType, direction);
 
-        for (int i = 0; i < numInputBuses; ++i)
-            warnOnFailure (holder->component->activateBus (Vst::kAudio, Vst::kInput,  i, getBus (true,  i)->isEnabled() ? 1 : 0));
+                for (int i = 0; i < numBuses; ++i)
+                {
+                    const auto enabled = mediaType == kEvent || getBus (isInput, i)->isEnabled();
 
-        for (int i = 0; i < numOutputBuses; ++i)
-            warnOnFailure (holder->component->activateBus (Vst::kAudio, Vst::kOutput, i, getBus (false, i)->isEnabled() ? 1 : 0));
+                    warnOnFailure (holder->component->activateBus (mediaType, direction, i, enabled));
+                }
+            }
+        }
 
         setLatencySamples (jmax (0, (int) processor->getLatencySamples()));
 
-        inputBusMap .prepare (createChannelMappings (true));
-        outputBusMap.prepare (createChannelMappings (false));
+        inputBusMap .prepare (std::move (inputMappings));
+        outputBusMap.prepare (std::move (outputMappings));
 
-        setStateForAllMidiBuses (true);
+        if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
+            return;
 
-        warnOnFailure (holder->component->setActive (true));
-        warnOnFailureIfImplemented (processor->setProcessing (true));
+        // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
+        const auto processingResult = warnOnFailureIfImplemented (processor->setProcessing (true));
+
+        if (processingResult != kResultOk && processingResult != kNotImplemented)
+        {
+            deactivateComponentChecked();
+            return;
+        }
 
         isActive = true;
     }
@@ -2411,6 +2475,8 @@ public:
 
         if (isActive && processor != nullptr)
             processAudio (buffer, midiMessages, Vst::kSample32, false);
+        else
+            buffer.clear();
     }
 
     void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
@@ -2421,6 +2487,8 @@ public:
 
         if (isActive && processor != nullptr)
             processAudio (buffer, midiMessages, Vst::kSample64, false);
+        else
+            buffer.clear();
     }
 
     void processBlockBypassed (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
@@ -2433,6 +2501,8 @@ public:
         {
             if (isActive && processor != nullptr)
                 processAudio (buffer, midiMessages, Vst::kSample32, true);
+            else
+                buffer.clear();
         }
         else
         {
@@ -2450,6 +2520,8 @@ public:
         {
             if (isActive && processor != nullptr)
                 processAudio (buffer, midiMessages, Vst::kSample64, true);
+            else
+                buffer.clear();
         }
         else
         {
@@ -2518,6 +2590,9 @@ public:
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override
     {
         const SpinLock::ScopedLockType processLock (processMutex);
+
+        if (componentNeedsReplacement.load())
+            return false;
 
         // if the processor is not active, we ask the underlying plug-in if the
         // layout is actually supported
@@ -2601,6 +2676,9 @@ public:
 
     bool canApplyBusesLayout (const BusesLayout& layouts) const override
     {
+        if (componentNeedsReplacement.load())
+            return false;
+
         // someone tried to change the layout while the AudioProcessor is running
         // call releaseResources first!
         jassert (! isActive);
@@ -2799,14 +2877,31 @@ public:
     {
         const SpinLock::ScopedLockType lock (processMutex);
 
-        if (holder->component != nullptr && processor != nullptr)
-        {
-            processor->setProcessing (false);
-            holder->component->setActive (false);
+        if (! isActive || componentNeedsReplacement.load())
+            return;
 
-            holder->component->setActive (true);
-            processor->setProcessing (true);
+        isActive = false;
+
+        if (! stopProcessingChecked())
+            return;
+
+        if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
+        {
+            deactivateBusesChecked();
+            return;
         }
+
+        // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
+        const auto result = warnOnFailureIfImplemented (processor->setProcessing (true));
+
+        if (result != kResultOk && result != kNotImplemented)
+        {
+            deactivateComponentChecked();
+            deactivateBusesChecked();
+            return;
+        }
+
+        isActive = true;
     }
 
     //==============================================================================
@@ -2832,6 +2927,10 @@ public:
 
     void setStateInformation (const void* data, int sizeInBytes) override
     {
+        // Do not restore state when the component needs replacement.
+        if (componentNeedsReplacement.load())
+            return;
+
         // The VST3 plugin format requires that get/set state calls are made
         // from the message thread.
         // We'll lock the message manager here as a safety precaution, but some
@@ -2904,6 +3003,10 @@ public:
 
     bool setStateFromPresetFile (const MemoryBlock& rawData) const
     {
+        // Do not restore state when the component needs replacement.
+        if (componentNeedsReplacement.load())
+            return false;
+
         auto rawDataCopy = rawData;
         auto memoryStream = becomeVSTComSmartPtrOwner (new MemoryStream (rawDataCopy.getData(), (int) rawDataCopy.getSize()));
 
@@ -2954,6 +3057,63 @@ public:
     }
 
 private:
+    // These lifecycle helpers must be called with processMutex held.
+    void markNeedsReplacement() noexcept
+    {
+        componentNeedsReplacement.store (true);
+        isActive = false;
+    }
+
+    bool stopProcessingChecked()
+    {
+        if (componentNeedsReplacement.load())
+            return false;
+
+        if (processor != nullptr)
+        {
+            // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
+            const auto result = warnOnFailureIfImplemented (processor->setProcessing (false));
+
+            if (result != kResultOk && result != kNotImplemented)
+            {
+                markNeedsReplacement();
+                return false;
+            }
+        }
+
+        return deactivateComponentChecked();
+    }
+
+    bool deactivateComponentChecked()
+    {
+        if (componentNeedsReplacement.load())
+            return false;
+
+        if (holder->component != nullptr)
+            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
+            {
+                markNeedsReplacement();
+                return false;
+            }
+
+        return true;
+    }
+
+    // Bus (de)activation results are only warned about, as upstream JUCE and Ardour do:
+    // bus state does not decide whether the component is active, and every prepare sets
+    // each bus explicitly again. Skipped once the component state is uncertain.
+    void deactivateBusesChecked()
+    {
+        if (componentNeedsReplacement.load())
+            return;
+
+        for (const auto direction : { Vst::kInput, Vst::kOutput })
+            for (int i = 0; i < holder->component->getBusCount (Vst::kAudio, direction); ++i)
+                warnOnFailure (holder->component->activateBus (Vst::kAudio, direction, i, false));
+
+        setStateForAllMidiBuses (false);
+    }
+
     void deactivate()
     {
         if (! isActive)
@@ -2961,13 +3121,8 @@ private:
 
         isActive = false;
 
-        if (processor != nullptr)
-            warnOnFailureIfImplemented (processor->setProcessing (false));
-
-        if (holder->component != nullptr)
-            warnOnFailure (holder->component->setActive (false));
-
-        setStateForAllMidiBuses (false);
+        if (stopProcessingChecked())
+            deactivateBusesChecked();
     }
 
     //==============================================================================
@@ -3058,7 +3213,9 @@ private:
     VSTComSmartPtr<MidiEventList> midiInputs  = addVSTComSmartPtrOwner (new MidiEventList);
     VSTComSmartPtr<MidiEventList> midiOutputs = addVSTComSmartPtrOwner (new MidiEventList);
     Vst::ProcessContext timingInfo; //< Only use this in processBlock()!
-    bool isControllerInitialised = false, isActive = false, lastProcessBlockCallWasBypass = false;
+    std::atomic<bool> isActive { false };
+    std::atomic<bool> componentNeedsReplacement { false };
+    bool isControllerInitialised = false, lastProcessBlockCallWasBypass = false;
     const bool hasMidiInput  = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::input) > 0,
                hasMidiOutput = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::output) > 0;
     VST3Parameter* bypassParam = nullptr;
@@ -3219,6 +3376,7 @@ private:
         setup.sampleRate           = 44100.0;
         setup.processMode          = Vst::kRealtime;
 
+        // Setup Done before layout probing and tail queries (VST3 SDK); prepareToPlay sets up again with the negotiated layout before activation.
         warnOnFailure (processor->setupProcessing (setup));
 
         inputBusMap .prepare (createChannelMappings (true));
