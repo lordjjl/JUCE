@@ -2313,9 +2313,11 @@ public:
         JUCE_ASSERT_MESSAGE_THREAD
         MessageManagerLock lock;
 
+        // Known upstream limitation: a synchronous restartComponent reentering release/reset
+        // while prepare holds this non-recursive lock is not handled here.
         const SpinLock::ScopedLockType processLock (processMutex);
 
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return;
 
         // Avoid redundantly calling things like setActive, which can be a heavy-duty call for some plugins:
@@ -2332,7 +2334,7 @@ public:
         deactivate();
 
         // Ardour likewise refuses to reconfigure after a failed deactivation.
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return;
 
         ProcessSetup setup;
@@ -2350,6 +2352,7 @@ public:
         if (! holder->initialise())
             return;
 
+        const auto requestedLayouts = getBusesLayout();
         auto inArrangements  = busLayoutsToArrangements (true) .value_or (std::vector<SpeakerArrangement>{});
         auto outArrangements = busLayoutsToArrangements (false).value_or (std::vector<SpeakerArrangement>{});
 
@@ -2361,11 +2364,10 @@ public:
         const auto arrangementResult = warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
                                                                                    outData, static_cast<int32> (outArrangements.size())));
 
-        // Success and refused requests are non-fatal; other errors prevent preparation.
+        // Refused requests may proceed only if the reported enabled layouts still match.
         if (arrangementResult != kResultOk && arrangementResult != kResultFalse)
             return;
 
-        auto actualLayouts = getBusesLayout();
         std::vector<ChannelMapping> inputMappings, outputMappings;
 
         for (const auto isInput : { true, false })
@@ -2389,14 +2391,12 @@ public:
 
                 mappings.emplace_back (*layout, getBus (isInput, i)->isEnabled());
 
-                if (getBus (isInput, i)->isEnabled())
-                    actualLayouts.getBuses (isInput).set (i, *layout);
+                // Hosts size buffers from the negotiated layout, so a silent width change
+                // at prepare must not reach process().
+                if (getBus (isInput, i)->isEnabled() && *layout != requestedLayouts.getBuses (isInput)[i])
+                    return;
             }
         }
-
-        // Update the wrapper directly without negotiating the accepted layout again.
-        if (! AudioProcessor::applyBusLayouts (actualLayouts))
-            return;
 
         if (warnOnFailure (processor->setupProcessing (setup)) != kResultOk)
             return;
@@ -2433,7 +2433,7 @@ public:
 
         if (processingResult != kResultOk && processingResult != kNotImplemented)
         {
-            stopProcessingChecked();
+            deactivateComponentChecked();
             return;
         }
 
@@ -2591,7 +2591,7 @@ public:
     {
         const SpinLock::ScopedLockType processLock (processMutex);
 
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return false;
 
         // if the processor is not active, we ask the underlying plug-in if the
@@ -2676,7 +2676,7 @@ public:
 
     bool canApplyBusesLayout (const BusesLayout& layouts) const override
     {
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return false;
 
         // someone tried to change the layout while the AudioProcessor is running
@@ -2877,7 +2877,7 @@ public:
     {
         const SpinLock::ScopedLockType lock (processMutex);
 
-        if (! isActive || componentNeedsReplacement)
+        if (! isActive || componentNeedsReplacement.load())
             return;
 
         isActive = false;
@@ -2885,15 +2885,9 @@ public:
         if (! stopProcessingChecked())
             return;
 
-        const auto unwind = [&]
-        {
-            stopProcessingChecked();
-            deactivateBusesChecked();
-        };
-
         if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
         {
-            unwind();
+            deactivateBusesChecked();
             return;
         }
 
@@ -2902,7 +2896,8 @@ public:
 
         if (result != kResultOk && result != kNotImplemented)
         {
-            unwind();
+            deactivateComponentChecked();
+            deactivateBusesChecked();
             return;
         }
 
@@ -3057,13 +3052,13 @@ private:
     // These lifecycle helpers must be called with processMutex held.
     void markNeedsReplacement() noexcept
     {
-        componentNeedsReplacement = true;
+        componentNeedsReplacement.store (true);
         isActive = false;
     }
 
     bool stopProcessingChecked()
     {
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return false;
 
         if (processor != nullptr)
@@ -3072,14 +3067,28 @@ private:
             const auto result = warnOnFailureIfImplemented (processor->setProcessing (false));
 
             if (result != kResultOk && result != kNotImplemented)
+            {
                 markNeedsReplacement();
+                return false;
+            }
         }
+
+        return deactivateComponentChecked();
+    }
+
+    bool deactivateComponentChecked()
+    {
+        if (componentNeedsReplacement.load())
+            return false;
 
         if (holder->component != nullptr)
             if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
+            {
                 markNeedsReplacement();
+                return false;
+            }
 
-        return ! componentNeedsReplacement;
+        return true;
     }
 
     // Bus (de)activation results are only warned about, as upstream JUCE and Ardour do:
@@ -3087,7 +3096,7 @@ private:
     // each bus explicitly again. Skipped once the component state is uncertain.
     void deactivateBusesChecked()
     {
-        if (componentNeedsReplacement)
+        if (componentNeedsReplacement.load())
             return;
 
         for (const auto isInput : { true, false })
@@ -3197,7 +3206,7 @@ private:
     VSTComSmartPtr<MidiEventList> midiOutputs = addVSTComSmartPtrOwner (new MidiEventList);
     Vst::ProcessContext timingInfo; //< Only use this in processBlock()!
     std::atomic<bool> isActive { false };
-    bool componentNeedsReplacement = false; // Guarded by processMutex, like the writers of isActive.
+    std::atomic<bool> componentNeedsReplacement { false };
     bool isControllerInitialised = false, lastProcessBlockCallWasBypass = false;
     const bool hasMidiInput  = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::input) > 0,
                hasMidiOutput = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::output) > 0;
