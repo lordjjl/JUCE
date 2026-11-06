@@ -2162,6 +2162,7 @@ public:
         if (isControllerInitialised && ! holder->isIComponentAlsoIEditController())
             editController->terminate();
 
+        // An unusable component is still terminated because nothing safer is possible; bus calls are skipped.
         holder->terminate();
 
         componentConnection = nullptr;
@@ -2314,6 +2315,9 @@ public:
 
         const SpinLock::ScopedLockType processLock (processMutex);
 
+        if (componentNeedsReplacement)
+            return;
+
         // Avoid redundantly calling things like setActive, which can be a heavy-duty call for some plugins:
         if (isActive
               && approximatelyEqual (getSampleRate(), newSampleRate)
@@ -2327,7 +2331,7 @@ public:
         // activation can be updated safely.
         deactivate();
 
-        // The instance must be replaced after a failed deactivation, as Ardour does.
+        // Ardour likewise refuses to reconfigure after a failed deactivation.
         if (componentNeedsReplacement)
             return;
 
@@ -2340,7 +2344,7 @@ public:
         const ScopeGuard cleanup { [&]
         {
             if (! isActive)
-                deactivateBuses();
+                deactivateBusesChecked();
         } };
 
         if (! holder->initialise())
@@ -2411,8 +2415,7 @@ public:
                 {
                     const auto enabled = mediaType == kEvent || getBus (isInput, i)->isEnabled();
 
-                    if (warnOnFailure (holder->component->activateBus (mediaType, direction, i, enabled)) != kResultOk)
-                        return;
+                    warnOnFailure (holder->component->activateBus (mediaType, direction, i, enabled));
                 }
             }
         }
@@ -2425,14 +2428,12 @@ public:
         if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
             return;
 
+        // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
         const auto processingResult = warnOnFailureIfImplemented (processor->setProcessing (true));
 
         if (processingResult != kResultOk && processingResult != kNotImplemented)
         {
-            warnOnFailureIfImplemented (processor->setProcessing (false));
-            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
-                componentNeedsReplacement = true;
-
+            stopProcessingChecked();
             return;
         }
 
@@ -2590,6 +2591,9 @@ public:
     {
         const SpinLock::ScopedLockType processLock (processMutex);
 
+        if (componentNeedsReplacement)
+            return false;
+
         // if the processor is not active, we ask the underlying plug-in if the
         // layout is actually supported
         if (! isActive)
@@ -2672,6 +2676,9 @@ public:
 
     bool canApplyBusesLayout (const BusesLayout& layouts) const override
     {
+        if (componentNeedsReplacement)
+            return false;
+
         // someone tried to change the layout while the AudioProcessor is running
         // call releaseResources first!
         jassert (! isActive);
@@ -2870,14 +2877,36 @@ public:
     {
         const SpinLock::ScopedLockType lock (processMutex);
 
-        if (holder->component != nullptr && processor != nullptr)
-        {
-            processor->setProcessing (false);
-            holder->component->setActive (false);
+        if (! isActive || componentNeedsReplacement)
+            return;
 
-            holder->component->setActive (true);
-            processor->setProcessing (true);
+        isActive = false;
+
+        if (! stopProcessingChecked())
+            return;
+
+        const auto unwind = [&]
+        {
+            stopProcessingChecked();
+            deactivateBusesChecked();
+        };
+
+        if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
+        {
+            unwind();
+            return;
         }
+
+        // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
+        const auto result = warnOnFailureIfImplemented (processor->setProcessing (true));
+
+        if (result != kResultOk && result != kNotImplemented)
+        {
+            unwind();
+            return;
+        }
+
+        isActive = true;
     }
 
     //==============================================================================
@@ -3025,8 +3054,42 @@ public:
     }
 
 private:
-    void deactivateBuses()
+    // These lifecycle helpers must be called with processMutex held.
+    void markNeedsReplacement() noexcept
     {
+        componentNeedsReplacement = true;
+        isActive = false;
+    }
+
+    bool stopProcessingChecked()
+    {
+        if (componentNeedsReplacement)
+            return false;
+
+        if (processor != nullptr)
+        {
+            // The SDK documents setProcessing as optional to implement, and Ardour also accepts kNotImplemented.
+            const auto result = warnOnFailureIfImplemented (processor->setProcessing (false));
+
+            if (result != kResultOk && result != kNotImplemented)
+                markNeedsReplacement();
+        }
+
+        if (holder->component != nullptr)
+            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
+                markNeedsReplacement();
+
+        return ! componentNeedsReplacement;
+    }
+
+    // Bus (de)activation results are only warned about, as upstream JUCE and Ardour do:
+    // bus state does not decide whether the component is active, and every prepare sets
+    // each bus explicitly again. Skipped once the component state is uncertain.
+    void deactivateBusesChecked()
+    {
+        if (componentNeedsReplacement)
+            return;
+
         for (const auto isInput : { true, false })
             for (int i = 0; i < getBusCount (isInput); ++i)
                 warnOnFailure (holder->component->activateBus (Vst::kAudio, isInput ? Vst::kInput : Vst::kOutput, i, false));
@@ -3041,16 +3104,8 @@ private:
 
         isActive = false;
 
-        if (processor != nullptr)
-            warnOnFailureIfImplemented (processor->setProcessing (false));
-
-        if (holder->component != nullptr)
-        {
-            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
-                componentNeedsReplacement = true;
-        }
-
-        deactivateBuses();
+        if (stopProcessingChecked())
+            deactivateBusesChecked();
     }
 
     //==============================================================================
