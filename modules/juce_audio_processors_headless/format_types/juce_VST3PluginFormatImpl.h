@@ -2927,6 +2927,10 @@ public:
 
     void setStateInformation (const void* data, int sizeInBytes) override
     {
+        // Do not restore state when the component needs replacement.
+        if (componentNeedsReplacement.load())
+            return;
+
         // The VST3 plugin format requires that get/set state calls are made
         // from the message thread.
         // We'll lock the message manager here as a safety precaution, but some
@@ -2999,6 +3003,10 @@ public:
 
     bool setStateFromPresetFile (const MemoryBlock& rawData) const
     {
+        // Do not restore state when the component needs replacement.
+        if (componentNeedsReplacement.load())
+            return false;
+
         auto rawDataCopy = rawData;
         auto memoryStream = becomeVSTComSmartPtrOwner (new MemoryStream (rawDataCopy.getData(), (int) rawDataCopy.getSize()));
 
@@ -3099,9 +3107,9 @@ private:
         if (componentNeedsReplacement.load())
             return;
 
-        for (const auto isInput : { true, false })
-            for (int i = 0; i < getBusCount (isInput); ++i)
-                warnOnFailure (holder->component->activateBus (Vst::kAudio, isInput ? Vst::kInput : Vst::kOutput, i, false));
+        for (const auto direction : { Vst::kInput, Vst::kOutput })
+            for (int i = 0; i < holder->component->getBusCount (Vst::kAudio, direction); ++i)
+                warnOnFailure (holder->component->activateBus (Vst::kAudio, direction, i, false));
 
         setStateForAllMidiBuses (false);
     }
@@ -3368,8 +3376,9 @@ private:
         setup.sampleRate           = 44100.0;
         setup.processMode          = Vst::kRealtime;
 
-        // Defer setupProcessing until prepareToPlay has negotiated the bus layouts.
-        // Initialisation only needs the wrapper's default rate and channel mappings.
+        // Setup Done before any bus, layout or tail query (VST3 SDK); prepareToPlay sets up again with the negotiated layout before activation.
+        warnOnFailure (processor->setupProcessing (setup));
+
         inputBusMap .prepare (createChannelMappings (true));
         outputBusMap.prepare (createChannelMappings (false));
         setRateAndBufferSizeDetails (setup.sampleRate, (int) setup.maxSamplesPerBlock);
