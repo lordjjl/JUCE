@@ -2327,6 +2327,10 @@ public:
         // activation can be updated safely.
         deactivate();
 
+        // The instance must be replaced after a failed deactivation, as Ardour does.
+        if (componentNeedsReplacement)
+            return;
+
         ProcessSetup setup;
         setup.symbolicSampleSize    = isUsingDoublePrecision() ? kSample64 : kSample32;
         setup.maxSamplesPerBlock    = estimatedSamplesPerBlock;
@@ -2350,10 +2354,13 @@ public:
         auto* inData  = inArrangements .empty() ? &nullArrangement : inArrangements .data();
         auto* outData = outArrangements.empty() ? &nullArrangement : outArrangements.data();
 
-        warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
-                                                      outData, static_cast<int32> (outArrangements.size())));
+        const auto arrangementResult = warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
+                                                                                   outData, static_cast<int32> (outArrangements.size())));
 
-        // A refused request is not fatal: use the layouts reported by the plugin.
+        // Success and refused requests are non-fatal; other errors prevent preparation.
+        if (arrangementResult != kResultOk && arrangementResult != kResultFalse)
+            return;
+
         auto actualLayouts = getBusesLayout();
         std::vector<ChannelMapping> inputMappings, outputMappings;
 
@@ -2423,7 +2430,9 @@ public:
         if (processingResult != kResultOk && processingResult != kNotImplemented)
         {
             warnOnFailureIfImplemented (processor->setProcessing (false));
-            warnOnFailure (holder->component->setActive (false));
+            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
+                componentNeedsReplacement = true;
+
             return;
         }
 
@@ -3036,7 +3045,10 @@ private:
             warnOnFailureIfImplemented (processor->setProcessing (false));
 
         if (holder->component != nullptr)
-            warnOnFailure (holder->component->setActive (false));
+        {
+            if (warnOnFailure (holder->component->setActive (false)) != kResultOk)
+                componentNeedsReplacement = true;
+        }
 
         deactivateBuses();
     }
@@ -3130,6 +3142,7 @@ private:
     VSTComSmartPtr<MidiEventList> midiOutputs = addVSTComSmartPtrOwner (new MidiEventList);
     Vst::ProcessContext timingInfo; //< Only use this in processBlock()!
     std::atomic<bool> isActive { false };
+    bool componentNeedsReplacement = false; // Guarded by processMutex, like the writers of isActive.
     bool isControllerInitialised = false, lastProcessBlockCallWasBypass = false;
     const bool hasMidiInput  = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::input) > 0,
                hasMidiOutput = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::output) > 0;
