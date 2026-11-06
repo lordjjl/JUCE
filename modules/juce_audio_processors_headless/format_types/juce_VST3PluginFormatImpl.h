@@ -2232,6 +2232,8 @@ public:
 
             Vst::IComponent* getIComponentPtr() const noexcept override   { return instance->holder->component.get(); }
 
+            bool isProcessingActive() const noexcept override { return instance->isActive.load(); }
+
             MemoryBlock getPreset() const override             { return instance->getStateForPresetFile(); }
 
             bool setPreset (const MemoryBlock& rawData) const override
@@ -2331,9 +2333,14 @@ public:
         setup.sampleRate            = newSampleRate;
         setup.processMode           = isNonRealtime() ? kOffline : kRealtime;
 
-        warnOnFailure (processor->setupProcessing (setup));
+        const ScopeGuard cleanup { [&]
+        {
+            if (! isActive)
+                deactivateBuses();
+        } };
 
-        holder->initialise();
+        if (! holder->initialise())
+            return;
 
         auto inArrangements  = busLayoutsToArrangements (true) .value_or (std::vector<SpeakerArrangement>{});
         auto outArrangements = busLayoutsToArrangements (false).value_or (std::vector<SpeakerArrangement>{});
@@ -2346,32 +2353,79 @@ public:
         warnOnFailure (processor->setBusArrangements (inData,  static_cast<int32> (inArrangements .size()),
                                                       outData, static_cast<int32> (outArrangements.size())));
 
-        const auto inArrActual  = getActualArrangements (true);
-        const auto outArrActual = getActualArrangements (false);
+        // A refused request is not fatal: use the layouts reported by the plugin.
+        auto actualLayouts = getBusesLayout();
+        std::vector<ChannelMapping> inputMappings, outputMappings;
 
-        jassert (inArrActual == inArrangements && outArrActual == outArrangements);
+        for (const auto isInput : { true, false })
+        {
+            auto& mappings = isInput ? inputMappings : outputMappings;
+
+            if (holder->component->getBusCount (kAudio, isInput ? kInput : kOutput) != getBusCount (isInput))
+                return;
+
+            for (int i = 0; i < getBusCount (isInput); ++i)
+            {
+                SpeakerArrangement arrangement = {};
+
+                if (processor->getBusArrangement (isInput ? kInput : kOutput, i, arrangement) != kResultOk)
+                    return;
+
+                const auto layout = getChannelSetForSpeakerArrangement (arrangement);
+
+                if (! layout.has_value() || (getBus (isInput, i)->isEnabled() && layout->isDisabled()))
+                    return;
+
+                mappings.emplace_back (*layout, getBus (isInput, i)->isEnabled());
+
+                if (getBus (isInput, i)->isEnabled())
+                    actualLayouts.getBuses (isInput).set (i, *layout);
+            }
+        }
+
+        // Update the wrapper directly without negotiating the accepted layout again.
+        if (! AudioProcessor::applyBusLayouts (actualLayouts))
+            return;
+
+        if (warnOnFailure (processor->setupProcessing (setup)) != kResultOk)
+            return;
 
         // Needed for having the same sample rate in processBlock(); some plugins need this!
         setRateAndBufferSizeDetails (newSampleRate, estimatedSamplesPerBlock);
 
-        auto numInputBuses  = getBusCount (true);
-        auto numOutputBuses = getBusCount (false);
+        for (const auto mediaType : { kAudio, kEvent })
+        {
+            for (const auto isInput : { true, false })
+            {
+                const auto direction = isInput ? kInput : kOutput;
+                const auto numBuses = holder->component->getBusCount (mediaType, direction);
 
-        for (int i = 0; i < numInputBuses; ++i)
-            warnOnFailure (holder->component->activateBus (Vst::kAudio, Vst::kInput,  i, getBus (true,  i)->isEnabled() ? 1 : 0));
+                for (int i = 0; i < numBuses; ++i)
+                {
+                    const auto enabled = mediaType == kEvent || getBus (isInput, i)->isEnabled();
 
-        for (int i = 0; i < numOutputBuses; ++i)
-            warnOnFailure (holder->component->activateBus (Vst::kAudio, Vst::kOutput, i, getBus (false, i)->isEnabled() ? 1 : 0));
+                    if (warnOnFailure (holder->component->activateBus (mediaType, direction, i, enabled)) != kResultOk)
+                        return;
+                }
+            }
+        }
 
         setLatencySamples (jmax (0, (int) processor->getLatencySamples()));
 
-        inputBusMap .prepare (createChannelMappings (true));
-        outputBusMap.prepare (createChannelMappings (false));
+        inputBusMap .prepare (std::move (inputMappings));
+        outputBusMap.prepare (std::move (outputMappings));
 
-        setStateForAllMidiBuses (true);
+        if (warnOnFailure (holder->component->setActive (true)) != kResultOk)
+            return;
 
-        warnOnFailure (holder->component->setActive (true));
-        warnOnFailureIfImplemented (processor->setProcessing (true));
+        const auto processingResult = warnOnFailureIfImplemented (processor->setProcessing (true));
+
+        if (processingResult != kResultOk && processingResult != kNotImplemented)
+        {
+            warnOnFailureIfImplemented (processor->setProcessing (false));
+            warnOnFailure (holder->component->setActive (false));
+            return;
+        }
 
         isActive = true;
     }
@@ -2411,6 +2465,8 @@ public:
 
         if (isActive && processor != nullptr)
             processAudio (buffer, midiMessages, Vst::kSample32, false);
+        else
+            buffer.clear();
     }
 
     void processBlock (AudioBuffer<double>& buffer, MidiBuffer& midiMessages) override
@@ -2421,6 +2477,8 @@ public:
 
         if (isActive && processor != nullptr)
             processAudio (buffer, midiMessages, Vst::kSample64, false);
+        else
+            buffer.clear();
     }
 
     void processBlockBypassed (AudioBuffer<float>& buffer, MidiBuffer& midiMessages) override
@@ -2433,6 +2491,8 @@ public:
         {
             if (isActive && processor != nullptr)
                 processAudio (buffer, midiMessages, Vst::kSample32, true);
+            else
+                buffer.clear();
         }
         else
         {
@@ -2450,6 +2510,8 @@ public:
         {
             if (isActive && processor != nullptr)
                 processAudio (buffer, midiMessages, Vst::kSample64, true);
+            else
+                buffer.clear();
         }
         else
         {
@@ -2954,6 +3016,15 @@ public:
     }
 
 private:
+    void deactivateBuses()
+    {
+        for (const auto isInput : { true, false })
+            for (int i = 0; i < getBusCount (isInput); ++i)
+                warnOnFailure (holder->component->activateBus (Vst::kAudio, isInput ? Vst::kInput : Vst::kOutput, i, false));
+
+        setStateForAllMidiBuses (false);
+    }
+
     void deactivate()
     {
         if (! isActive)
@@ -2967,7 +3038,7 @@ private:
         if (holder->component != nullptr)
             warnOnFailure (holder->component->setActive (false));
 
-        setStateForAllMidiBuses (false);
+        deactivateBuses();
     }
 
     //==============================================================================
@@ -3058,7 +3129,8 @@ private:
     VSTComSmartPtr<MidiEventList> midiInputs  = addVSTComSmartPtrOwner (new MidiEventList);
     VSTComSmartPtr<MidiEventList> midiOutputs = addVSTComSmartPtrOwner (new MidiEventList);
     Vst::ProcessContext timingInfo; //< Only use this in processBlock()!
-    bool isControllerInitialised = false, isActive = false, lastProcessBlockCallWasBypass = false;
+    std::atomic<bool> isActive { false };
+    bool isControllerInitialised = false, lastProcessBlockCallWasBypass = false;
     const bool hasMidiInput  = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::input) > 0,
                hasMidiOutput = getNumSingleDirectionBusesFor (holder->component.get(), MediaKind::event, Direction::output) > 0;
     VST3Parameter* bypassParam = nullptr;
@@ -3219,8 +3291,8 @@ private:
         setup.sampleRate           = 44100.0;
         setup.processMode          = Vst::kRealtime;
 
-        warnOnFailure (processor->setupProcessing (setup));
-
+        // Defer setupProcessing until prepareToPlay has negotiated the bus layouts.
+        // Initialisation only needs the wrapper's default rate and channel mappings.
         inputBusMap .prepare (createChannelMappings (true));
         outputBusMap.prepare (createChannelMappings (false));
         setRateAndBufferSizeDetails (setup.sampleRate, (int) setup.maxSamplesPerBlock);
