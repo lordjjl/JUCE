@@ -3376,7 +3376,7 @@ private:
         setup.sampleRate           = 44100.0;
         setup.processMode          = Vst::kRealtime;
 
-        // Setup Done before any bus, layout or tail query (VST3 SDK); prepareToPlay sets up again with the negotiated layout before activation.
+        // Setup Done before layout probing and tail queries (VST3 SDK); prepareToPlay sets up again with the negotiated layout before activation.
         warnOnFailure (processor->setupProcessing (setup));
 
         inputBusMap .prepare (createChannelMappings (true));
