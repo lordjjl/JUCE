@@ -689,11 +689,48 @@ struct VST3HostContextHeadless : public Vst::IComponentHandler,
         return plugin;
     }
 
+    /** Returns the flags of the restart being handled on the calling thread, or 0. */
+    int32 getRestartFlagsInFlight() const noexcept
+    {
+        return restartThread.load() == Thread::getCurrentThreadId() ? restartFlagsInFlight.load() : 0;
+    }
+
 private:
+    //==============================================================================
+    /*  Records the flags of the restart being handled for the duration of the handler,
+        restoring the previous values on every exit so that a nested restart can't clear
+        the outer one.
+    */
+    struct ScopedRestartInFlight
+    {
+        ScopedRestartInFlight (VST3HostContextHeadless& ownerIn, int32 flags) noexcept
+            : owner (ownerIn),
+              previousThread (owner.restartThread.exchange (Thread::getCurrentThreadId())),
+              previousFlags (owner.restartFlagsInFlight.exchange (flags))
+        {
+        }
+
+        ~ScopedRestartInFlight() noexcept
+        {
+            owner.restartFlagsInFlight.store (previousFlags);
+            owner.restartThread.store (previousThread);
+        }
+
+        VST3HostContextHeadless& owner;
+        const Thread::ThreadID previousThread;
+        const int32 previousFlags;
+
+        JUCE_DECLARE_NON_COPYABLE (ScopedRestartInFlight)
+        JUCE_DECLARE_NON_MOVEABLE (ScopedRestartInFlight)
+    };
+
     //==============================================================================
     VST3PluginInstanceHeadless* plugin = nullptr;
     Atomic<int> refCount { 1 };
     String appName;
+
+    std::atomic<Thread::ThreadID> restartThread { nullptr };
+    std::atomic<int32> restartFlagsInFlight { 0 };
 
     ComponentRestarter componentRestarter { *this };
 
@@ -2235,6 +2272,14 @@ public:
 
             bool isProcessingActive() const noexcept override { return instance->isActive.load(); }
 
+            int getRestartFlagsInFlight() const noexcept override
+            {
+                if (auto* host = instance->holder->host.get())
+                    return (int) host->getRestartFlagsInFlight();
+
+                return 0;
+            }
+
             MemoryBlock getPreset() const override             { return instance->getStateForPresetFile(); }
 
             bool setPreset (const MemoryBlock& rawData) const override
@@ -3674,6 +3719,8 @@ void VST3HostContextHeadless::restartComponentOnMessageThread (int32 flags)
         jassertfalse;
         return;
     }
+
+    const ScopedRestartInFlight restartInFlight { *this, flags };
 
     if (hasFlag (flags, Vst::kReloadComponent))
         plugin->reset();

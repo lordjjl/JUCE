@@ -75,6 +75,9 @@ struct AEffect;
 /** Defined when ExtensionsVisitor::VST3Client::isProcessingActive() is available. */
 #define JUCE_VST3_CLIENT_HAS_PROCESSING_ACTIVE 1
 
+/** Defined when ExtensionsVisitor::VST3Client::getRestartFlagsInFlight() is available. */
+#define JUCE_VST3_CLIENT_HAS_RESTART_FLAGS_IN_FLIGHT 1
+
 namespace juce
 {
 
@@ -109,6 +112,17 @@ struct ExtensionsVisitor
             The default returns true for clients that do not report their activation state.
         */
         virtual bool isProcessingActive() const noexcept { return true; }
+
+        /** Returns the Steinberg::Vst::RestartFlags of the restartComponent() request that the
+            wrapper is currently handling on the calling thread, or 0 if no restart is being
+            handled on the calling thread.
+
+            AudioProcessorListener callbacks made while the wrapper handles a restart (for
+            example the latency and host-display notifications) can use this to find out which
+            restart caused them. The value is only non-zero on the thread handling the restart.
+            The default returns 0 for clients that do not report restarts.
+        */
+        virtual int getRestartFlagsInFlight() const noexcept { return 0; }
 
         virtual MemoryBlock getPreset() const = 0;
         virtual bool setPreset (const MemoryBlock&) const = 0;
